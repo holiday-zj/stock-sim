@@ -1,0 +1,5 @@
+data/llm.env
+data/state.json
+data/*.tmp
+logs/
+node_modules/
