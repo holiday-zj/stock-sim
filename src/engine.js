@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const state = loadState();
-let tradeDays = null;          // 交易日历缓存（上证日K日期）
+let tradeDays = null;          // 交易日历缓存（上证日K日期，30分钟TTL——凌晨缓存可能缺当日）
 let lastDecisionTs = 0;
 let running = false;
 let stopped = false;           // 实验到期后停止交易
@@ -27,11 +27,11 @@ function inDecisionWindow() {
 }
 
 async function ensureTradeDays() {
-  const today = bjDate();
-  if (tradeDays && tradeDays.today === today) return tradeDays.days;
+  const now = Date.now();
+  if (tradeDays && now - tradeDays.fetchedAt < 30 * 60e3) return tradeDays.days;
   const ks = await getDailyKline('000001', 40);
   if (!ks) return tradeDays?.days || [];
-  tradeDays = { today, days: ks.map(k => k.date) };
+  tradeDays = { today: bjDate(), fetchedAt: now, days: ks.map(k => k.date) };
   return tradeDays.days;
 }
 function heldTradeDays(buyDate) {
