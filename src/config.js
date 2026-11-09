@@ -1,6 +1,6 @@
 // 全局配置：资金、费用、风控、调度
 export const CFG = {
-  startCash: 10000,           // 初始资金（元）
+  startCash: 100000,          // 初始资金（元）
   runStart: '2026-11-10',     // 实验起始日（北京时间）
   runEnd: '2026-12-10',       // 实验结束日（收盘后终止）
 
@@ -14,8 +14,8 @@ export const CFG = {
   },
 
   risk: {
-    maxPositions: 2,          // 最多同时持仓数（1万本金）
-    maxPosPct: 0.48,          // 单票仓位 ≤ 总资产48%
+    maxPositions: 3,          // 最多同时持仓数（10万本金）
+    maxPosPct: 0.35,          // 单票仓位 ≤ 总资产35%
     stopLoss: -0.06,          // 硬止损 -6%（程序强制，不问LLM）
     trailTrigger: 0.10,       // 浮盈 ≥10% 启动移动止盈
     trailGiveback: 0.035,     // 高点回撤 3.5% 触发卖出
@@ -23,7 +23,7 @@ export const CFG = {
   },
 
   picker: {
-    priceMin: 4, priceMax: 55,      // 价格区间（1万资金1手可买）
+    priceMin: 4, priceMax: 150,     // 价格区间（10万资金1手可买）
     turnoverMin: 3, turnoverMax: 22,// 换手率%
     mcapMin: 40e8, mcapMax: 900e8,  // 流通市值 40亿~900亿
     topN: 8,                        // 候选池大小
