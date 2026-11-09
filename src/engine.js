@@ -102,10 +102,25 @@ async function runDecisionRound(force = false) {
   persist(state);
 }
 
-// 收盘记账：写当日净值
+// 收盘记账：写当日净值（实验最后一天先尝试清仓，按收盘估值）
 async function closeOfDay() {
   const today = bjDate();
   if (state.daily.find(d => d.date === today)) return;
+  // 实验终点：尽力清仓（T+1锁定的留仓按收盘价计入净值）
+  if (today === CFG.runEnd) {
+    const codes = Object.keys(state.positions);
+    if (codes.length) {
+      const qs = await getQuotes(codes);
+      for (const code of codes) {
+        const p = state.positions[code];
+        const q = qs[code];
+        if (!p || !q || p.buyDate === today || limitDown(q)) continue;
+        const r = doSell(state, { code, price: q.price, reason: '[到期清仓]实验结束', quoteTime: q.time });
+        if (r.ok) logDecision(state, { type: 'FINAL_SELL', code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: '实验期结束清仓' });
+      }
+      persist(state);
+    }
+  }
   const codes = Object.keys(state.positions);
   const quotes = codes.length ? await getQuotes(codes) : {};
   const equity = equityOf(state, quotes);
