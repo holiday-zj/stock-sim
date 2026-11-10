@@ -1,6 +1,7 @@
 // 决策核心：把真实市场数据交给 LLM，输出买卖决策（JSON）
 import { CFG } from './config.js';
 import { llmChat } from './llm.js';
+import { lessonsForPrompt } from './evolve.js';
 import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements } from './market.js';
 import { buildCandidates } from './picker.js';
 import { sma, rsi } from './util.js';
@@ -87,6 +88,8 @@ export async function decide(s, opts = {}) {
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
 【候选股(按流动性筛出的活跃股,含真实技术面/新闻/公告/财务)】${JSON.stringify(candidates)}
 注：所有 pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi 单位为亿元；mainNet 为主力净流入(元)。
+【历史经验教训(每日复盘沉淀，优先级高于直觉，与盘面冲突时以盘面为准)】
+${lessonsForPrompt(15).map(t => '- ' + t).join('\n') || '- (尚无)'}
 
 请给出本轮操作。注意：候选股"price"为最新价，买入将按该价+0.1%滑点成交；持仓 canSellToday=false 表示T+1锁定不能卖。若无需操作，actions 输出 HOLD 或空数组。`;
 

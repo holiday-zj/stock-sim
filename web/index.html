@@ -49,6 +49,9 @@ h2{font-size:15px;margin:18px 0 8px;color:var(--gold)}
 <h2>交易流水 <span class="small" id="tradeCount"></span></h2>
 <div class="card"><table id="tradeTbl"><thead><tr><th>时间</th><th>方向</th><th>股票</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th><th>盈亏</th><th>理由</th></tr></thead><tbody></tbody></table></div>
 
+<h2>🧠 经验库（每日复盘进化）</h2>
+<div class="card"><div id="reflect" class="small" style="margin-bottom:6px"></div><table id="lessonTbl"><tbody></tbody></table></div>
+
 <h2>最近决策/事件</h2>
 <div class="card"><table id="decTbl"><thead><tr><th>时间</th><th>类型</th><th>内容</th></tr></thead><tbody></tbody></table></div>
 
@@ -84,6 +87,10 @@ async function refresh(){
   document.getElementById('tradeCount').textContent = `(共${d.trades.length}笔)`;
   const tb = document.querySelector('#tradeTbl tbody');
   tb.innerHTML = d.trades.length ? d.trades.slice().reverse().slice(0,50).map(t=>`<tr><td class="small">${t.ts}</td><td><span class="badge ${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'买入':'卖出'}</span></td><td><b>${t.name}</b><br><span class="small">${t.code}</span></td><td>${t.price}</td><td>${t.shares}</td><td>${t.amount}</td><td>${t.fee}</td><td class="${(t.profit||0)>=0?'pos':'neg'}">${t.profit!=null?(t.profit>=0?'+':'')+t.profit:'-'}</td><td class="reason">${t.reason||''}</td></tr>`).join('') : '<tr><td colspan="9" class="small">尚无交易</td></tr>';
+  const ls = d.lessons||{items:[],reflections:[]};
+  const rf = (ls.reflections||[]).slice(-1)[0];
+  document.getElementById('reflect').innerHTML = rf?`最新复盘(${rf.date}): ${rf.summary}`:'';
+  document.querySelector('#lessonTbl tbody').innerHTML = (ls.items||[]).length ? ls.items.slice().reverse().map(x=>`<tr><td class="small" style="width:60px">${x.date.slice(5)}</td><td class="reason" style="max-width:none;color:var(--txt)">${x.text}</td></tr>`).join('') : '<tr><td class="small">尚无经验</td></tr>';
   const decb = document.querySelector('#decTbl tbody');
   const rows=[];
   for(const x of d.decisions.slice().reverse().slice(0,25)) rows.push({ts:x.ts,type:x.type,text:(x.name?x.name+'('+x.code+') ':'')+(x.price?'@'+x.price+' ':'')+(x.reason||x.summary||'')});

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CFG } from './config.js';
 import { getState, status, manualDecision, manualClose } from './engine.js';
+import { loadLessons } from './evolve.js';
 import { getQuotes } from './market.js';
 import { equityOf } from './store.js';
 
@@ -48,6 +49,7 @@ export function startServer() {
           daily: s.daily,
           decisions: s.decisions.slice(-60),
           events: s.events.slice(-40),
+          lessons: loadLessons(),
         });
       }
       if (u.pathname === '/api/decide' && req.method === 'POST') {

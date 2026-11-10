@@ -1,5 +1,6 @@
 // 生成战绩报告（markdown）：node scripts/report.js
 import { loadState, equityOf } from '../src/store.js';
+import { loadLessons } from '../src/evolve.js';
 import { getQuotes } from '../src/market.js';
 import { CFG } from '../src/config.js';
 
@@ -38,6 +39,9 @@ ${Object.entries(s.positions).map(([c,p])=>{const q=quotes[c];const pr=q?.price|
 
 ## 每日净值
 ${s.daily.map(d=>`- ${d.date}: ¥${d.equity.toFixed(2)} (${d.totalPct>=0?'+':''}${d.totalPct}%) ${d.positions}`).join('\n') || '(尚无收盘记录)'}
+
+## 经验库（复盘沉淀）
+${loadLessons().items.slice(-10).map(x=>`- [${x.date.slice(5)}] ${x.text}`).join('\n') || '(尚无)'}
 
 ## 最近交易
 ${s.trades.slice(-30).reverse().map(t=>`- ${t.ts} ${t.side==='BUY'?'🟢买':'🔴卖'} ${t.name}(${t.code}) ${t.shares}股 @${t.price} ${t.profit!=null?`盈亏¥${t.profit}`:''} | ${t.reason||''}`.slice(0,180)).join('\n') || '(尚无交易)'}

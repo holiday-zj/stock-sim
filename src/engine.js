@@ -4,6 +4,7 @@ import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
 import { getQuotes, getDailyKline } from './market.js';
 import { decide, riskCheck, limitUp, limitDown } from './strategy.js';
+import { dailyReflection } from './evolve.js';
 import { sleep, appendLog } from './util.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -143,6 +144,17 @@ async function closeOfDay() {
   });
   logEvent(state, `收盘净值 ${equity.toFixed(2)} (${((equity/base-1)*100).toFixed(2)}%)`);
   persist(state);
+
+  // 每日复盘进化：LLM总结当天涨跌经验 → lessons.json → 注入次日决策
+  try {
+    const r = await dailyReflection(state, { quotes });
+    if (r.lessons.length) logEvent(state, `复盘新增${r.lessons.length}条经验: ${r.lessons.join('；').slice(0, 150)}`);
+    else logEvent(state, '复盘完成，无新增经验');
+    persist(state);
+  } catch (e) {
+    logEvent(state, '复盘失败: ' + e.message);
+    persist(state);
+  }
 }
 
 // 实验期检查
