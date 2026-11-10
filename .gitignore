@@ -1,5 +1,13 @@
-data/llm.env
-data/state.json
-data/*.tmp
+# 运行时数据（账户状态/经验库/战报/日志）——引擎每日改写，不入库
+data/
 logs/
+
+# 密钥（绝不入库）
+*.env
+
+# 依赖
 node_modules/
+
+# 临时调试脚本
+scripts/dbg*.js
+scripts/test-pro*.js

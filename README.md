@@ -2,7 +2,9 @@
 
 **实验期：2026-11-10 ~ 2026-12-10（一个月）· 本金 ¥100,000**
 
-真实股票代码、真实实时行情、真实新闻/公告/财务数据，由大模型（deepseek-v4.1-flash）决策买卖，全自动盯盘交易。零外部依赖（Node ≥ 22）。
+真实股票代码、真实实时行情、真实新闻/公告/财务/龙虎榜数据，由大模型（deepseek-v4-pro，思考模式）决策买卖，全自动盯盘交易。零外部依赖（Node ≥ 22）。
+
+> 部署提示：需自备 `data/llm.env`（LLM_BASE/LLM_KEY/LLM_MODEL，OpenAI兼容接口）。`data/`、`logs/` 均为运行时数据，已gitignore不入库。
 
 ## 架构
 - `src/market.js` — 数据源：东财 push2delay(HTTPS快照/排行/财务) + push2his(日K) + 搜索API(新闻) + 公告API + 腾讯qt(GBK兜底)
