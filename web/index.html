@@ -124,12 +124,11 @@ async function refresh(){
   pb.innerHTML = d.positions.length ? d.positions.map(p=>`<tr><td><b>${p.name}</b><br><span class="small">${p.code}</span></td><td>${p.shares}</td><td>${p.costPrice.toFixed(2)}</td><td>${p.price.toFixed(2)}</td><td class="${p.dayPct>=0?'up':'down'}">${p.dayPct!=null?(p.dayPct>=0?'+':'')+p.dayPct.toFixed(2)+'%':'-'}</td><td class="${p.pnl>=0?'pos':'neg'}">${p.pnl>=0?'+':''}${p.pnl.toFixed(2)}</td><td class="${p.pnlPct>=0?'pos':'neg'}">${p.pnlPct>=0?'+':''}${p.pnlPct.toFixed(2)}%</td><td class="small">${p.stopPrice?p.stopPrice:'<span class="small">待计算</span>'}</td><td class="reason">${p.reason||''}</td></tr>`).join('') : '<tr><td colspan="9" class="small">空仓</td></tr>';
   const db = document.querySelector('#dailyTbl tbody');
   db.innerHTML = d.daily.length ? d.daily.map(x=>`<tr><td>${x.date}</td><td>¥${x.equity.toFixed(2)}</td><td class="${x.totalPct>=0?'pos':'neg'}">${x.totalPct>=0?'+':''}${x.totalPct}%</td><td>${x.cash.toFixed(0)}</td><td class="small">${x.positions}</td></tr>`).join('') : '<tr><td colspan="5" class="small">尚无收盘记录</td></tr>';
-  if(d.daily.length>=1){
-   const vals=d.daily.map(x=>x.equity); const mn=Math.min(...vals,base),mx=Math.max(...vals,base);
-   document.getElementById('equityChart').innerHTML=vals.map((v,i)=>`<i title="${d.daily[i].date}: ¥${v.toFixed(0)} (${d.daily[i].totalPct}%)" style="height:${mx>mn?((v-mn)/(mx-mn)*36+4):20}px;background:${v>=base?'var(--red)':'var(--green)'};max-width:26px"></i>`).join('');
-  } else {
-   document.getElementById('equityChart').innerHTML='';
-  }
+  // 净值走势：≥2天才画曲线；空容器由CSS :empty隐藏，不占高度
+  document.getElementById('equityChart').innerHTML = d.daily.length>=2
+   ? (()=>{ const vals=d.daily.map(x=>x.equity); const mn=Math.min(...vals,base),mx=Math.max(...vals,base);
+       return vals.map((v,i)=>`<i title="${d.daily[i].date}: ¥${v.toFixed(0)} (${d.daily[i].totalPct}%)" style="height:${mx>mn?((v-mn)/(mx-mn)*36+4):20}px;background:${v>=base?'var(--red)':'var(--green)'};max-width:26px"></i>`).join(''); })()
+   : '';
   document.getElementById('tradeCount').textContent = `(共${d.trades.length}笔)`;
   const tb = document.querySelector('#tradeTbl tbody');
   tb.innerHTML = d.trades.length ? d.trades.slice().reverse().slice(0,50).map(t=>`<tr><td class="small">${t.ts}</td><td><span class="badge ${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'买入':'卖出'}</span></td><td><b>${t.name}</b><br><span class="small">${t.code}</span></td><td>${t.price}</td><td>${t.shares}</td><td>${t.amount}</td><td>${t.fee}</td><td class="${(t.profit||0)>=0?'pos':'neg'}">${t.profit!=null?(t.profit>=0?'+':'')+t.profit:'-'}</td><td class="reason">${t.reason||''}${t.sizing?'<br><span class="small">仓位: '+t.sizing+'</span>':''}</td></tr>`).join('') : '<tr><td colspan="9" class="small">尚无交易</td></tr>';
@@ -192,11 +191,13 @@ function mdToHtml(md){
   .replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
   .replace(/^- (.+)$/gm,'<div style="padding-left:10px">• $1</div>')
   .replace(/^  (.+)$/gm,'<div style="padding-left:26px;color:var(--dim);font-size:12px">$1</div>')
-  .replace(/^\|(.+)\|$/gm,(m)=>{const c=m.split('|').slice(1,-1).map(x=>x.trim());return '<tr>'+c.map(x=>x==='---'||/^-+$/.test(x)?'':`<td>${x}</td>`).join('')+'</tr>'})
-  .replace(/(<tr>.*<\/tr>)(\n<tr>.*<\/tr>)+/gs,(block)=>{
+  .replace(/^\|(.+)\|$/gm,(m)=>{const c=m.split('|').slice(1,-1).map(x=>x.trim());
+    if(c.every(x=>/^-{3,}$/.test(x))) return '<tr class="sep"></tr>';   // 整行都是---才是分隔行
+    return '<tr>'+c.map(x=>`<td>${x==='-'?'<span class="small">-</span>':x}</td>`).join('')+'</tr>';})
+  .replace(/(<tr>.*<\/tr>)(\n<tr[^>]*>.*<\/tr>)+/gs,(block)=>{
     const rows=block.split('\n');
     const head=rows[0].replace(/<tr>/,'<thead><tr>').replace(/<\/tr>/,'</tr></thead>');
-    return '<table>'+head+rows.slice(2).join('')+'</table>';
+    return '<table>'+head+rows.slice(2).join('')+'</table>';   // slice(2)跳过表头下的分隔行
   })
   .replace(/\n{2,}/g,'<br>').replace(/\n/g,'');
 }
