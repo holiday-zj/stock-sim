@@ -14,6 +14,8 @@ let tradeDays = null;          // 交易日历缓存（上证日K日期，30分�
 let lastDecisionTs = 0;
 let running = false;
 let stopped = false;           // 实验到期后停止交易
+let deciding = false;          // 决策回合互斥锁：防止tick重叠导致重复下单
+let closing = false;           // 收盘处理互斥锁
 
 function inTradeWindow() {
   const n = bjNow();
@@ -54,7 +56,16 @@ function heldTradeDays(buyDate) {
 
 // 执行一次决策回合
 async function runDecisionRound(force = false) {
+  if (deciding) return;                              // 已有回合在跑，跳过（关键：防并发重复下单）
   if (!force && Date.now() - lastDecisionTs < CFG.loop.decisionMinGapMin * 60e3) return;
+  deciding = true;
+  try {
+    await _runDecisionRound(force);
+  } finally {
+    deciding = false;
+  }
+}
+async function _runDecisionRound(force = false) {
   lastDecisionTs = Date.now();
   const codes = Object.keys(state.positions);
   const quotes = codes.length ? await getQuotes(codes) : {};
@@ -115,6 +126,11 @@ async function runDecisionRound(force = false) {
 
 // 收盘记账：写当日净值（实验最后一天先尝试清仓，按收盘估值）
 async function closeOfDay() {
+  if (closing) return;
+  closing = true;
+  try { await _closeOfDay(); } finally { closing = false; }
+}
+async function _closeOfDay() {
   const today = bjDate();
   if (state.daily.find(d => d.date === today)) return;
   // 实验终点：尽力清仓（T+1锁定的留仓按收盘价计入净值）
