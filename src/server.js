@@ -5,6 +5,7 @@ import path from 'node:path';
 import { CFG } from './config.js';
 import { getState, status, manualDecision, manualClose } from './engine.js';
 import { loadLessons } from './evolve.js';
+import { getReports } from './report.js';
 import { getQuotes } from './market.js';
 import { equityOf } from './store.js';
 
@@ -24,6 +25,10 @@ export function startServer() {
         return res.end(fs.readFileSync(path.join(WEB, 'index.html')));
       }
       if (u.pathname === '/api/status') return json(res, 200, status());
+      if (u.pathname === '/api/reports') {
+        const n = Math.min(+(u.searchParams.get('n') || 40), 120);
+        return json(res, 200, { reports: getReports(n) });
+      }
       if (u.pathname === '/api/state') {
         const s = getState();
         const quotes = Object.keys(s.positions).length ? await getQuotes(Object.keys(s.positions)) : {};

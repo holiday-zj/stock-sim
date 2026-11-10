@@ -6,6 +6,7 @@ import { getQuotes, getDailyKline, getMarketRegime } from './market.js';
 import { decide, riskCheck, limitUp, limitDown } from './strategy.js';
 import { calcShares } from './sizing.js';
 import { dailyReflection } from './evolve.js';
+import { buildDailyReport, saveDailyReport } from './report.js';
 import { sleep, appendLog } from './util.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -196,14 +197,24 @@ async function _closeOfDay() {
   persist(state);
 
   // 每日复盘进化：LLM总结当天涨跌经验 → lessons.json → 注入次日决策
+  let reflection = null;
   try {
-    const r = await dailyReflection(state, { quotes });
-    if (r.lessons.length) logEvent(state, `复盘新增${r.lessons.length}条经验: ${r.lessons.join('；').slice(0, 150)}`);
+    reflection = await dailyReflection(state, { quotes });
+    if (reflection.lessons.length) logEvent(state, `复盘新增${reflection.lessons.length}条经验: ${reflection.lessons.join('；').slice(0, 150)}`);
     else logEvent(state, '复盘完成，无新增经验');
     persist(state);
   } catch (e) {
     logEvent(state, '复盘失败: ' + e.message);
     persist(state);
+  }
+
+  // 生成当日战报落盘（看板/微信播报共用），复盘完成后生成以包含经验
+  try {
+    const rep = buildDailyReport(state, { date: today, quotes, reflection });
+    saveDailyReport(rep);
+    logEvent(state, `战报已生成 ${today} 净值${rep.equity} (${rep.totalPct}%)`);
+  } catch (e) {
+    logEvent(state, '战报生成失败: ' + e.message);
   }
 }
 
