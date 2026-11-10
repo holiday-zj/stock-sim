@@ -59,6 +59,7 @@ export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares:
   const tr = {
     ts: bjStamp(), side: 'BUY', code, name, price: exec, refPrice: price,
     shares, amount: +cost.toFixed(2), fee, quoteTime, reason,
+    stopPrice: stopPrice || null, sizing: sizingNote || null,
   };
   s.trades.push(tr);
   return { ok: true, trade: tr };

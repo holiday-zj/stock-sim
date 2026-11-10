@@ -47,13 +47,14 @@ export function startServer() {
               pnl: +((price - p.costPrice) * p.shares).toFixed(2),
               pnlPct: +((price / p.costPrice - 1) * 100).toFixed(2),
               buyTime: p.buyTime, high: +p.high.toFixed(2),
+              stopPrice: p.stopPrice || null,
               reason: (p.buyReason || '').slice(0, 80),
             };
           }),
           trades: s.trades.slice(-200),
           daily: s.daily,
-          decisions: s.decisions.slice(-60),
-          events: s.events.slice(-40),
+          decisions: s.decisions.slice(-500),
+          events: s.events.slice(-200),
           lessons: loadLessons(),
         });
       }
