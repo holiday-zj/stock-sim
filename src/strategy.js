@@ -2,7 +2,7 @@
 import { CFG } from './config.js';
 import { llmChat } from './llm.js';
 import { lessonsForPrompt } from './evolve.js';
-import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin } from './market.js';
+import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats } from './market.js';
 import { buildCandidates } from './picker.js';
 import { sma, rsi } from './util.js';
 
@@ -53,12 +53,13 @@ async function enrichHeld(s, quotes) {
   // 持仓票补充：K线技术面 + 最新新闻
   const out = [];
   for (const code of Object.keys(s.positions)) {
-    const [kl, news, trend, concepts, margin] = await Promise.all([
+    const [kl, news, trend, concepts, margin, billboard] = await Promise.all([
       getDailyKline(code, 40).catch(() => null),
       getNews(s.positions[code].name, code, 3).catch(() => []),
       getIntradayTrend(code, 20).catch(() => null),
       getConcepts(code, 5).catch(() => []),
       getMargin(code).catch(() => null),
+      getBillboard(code, { days: 10, limit: 2 }).catch(() => []),
     ]);
     const closes = (kl || []).map(k => k.close);
     out.push({
@@ -72,6 +73,7 @@ async function enrichHeld(s, quotes) {
       intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-10) } : null,
       concepts,
       margin: margin ? { rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2) } : null,
+      billboard: billboard.length ? await getBillboardSeats(code, { date: billboard[0].date, limit: 6 }).catch(() => billboard) : [],
     });
   }
   return out;
@@ -95,7 +97,7 @@ export async function decide(s, opts = {}) {
 【持仓明细】${JSON.stringify(heldSnap)}
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
 【候选股(按流动性筛出的活跃股,含真实技术面/新闻/公告/财务)】${JSON.stringify(candidates)}
-注：pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi/rzyeYi 单位为亿元；mainNet/rzjmeWan 为主力净流入(元)/融资净买入(万元)；concepts[].pct 为板块当日涨幅百分点；intraday.tail 为最近分钟分时[时间,价,量,均价]；forecast 为业绩预告(预增/预减+幅度%)。
+注：pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi/rzyeYi 单位为亿元；mainNet/rzjmeWan 为主力净流入(元)/融资净买入(万元)；concepts[].pct 为板块当日涨幅百分点；intraday.tail 为最近分钟分时[时间,价,量,均价]；forecast 为业绩预告(预增/预减+幅度%)；billboard 为近30天龙虎榜上榜记录(净买额万元)；billboardSeats 为席位明细(dept=机构/知名游资/北向/营业部，netWan净买万元，riseProb3d该席位3日胜率%)。龙虎榜代表大资金博弈：机构/知名游资大额净买入是加分项，上榜次日高开需谨慎（利好兑现出货）。
 【历史经验教训(每日复盘沉淀，优先级高于直觉，与盘面冲突时以盘面为准)】
 ${lessonsForPrompt(15).map(t => '- ' + t).join('\n') || '- (尚无)'}
 

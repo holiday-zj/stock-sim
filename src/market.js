@@ -225,6 +225,53 @@ export async function getProfitForecast(code) {
   } catch { return []; }
 }
 
+// ---------- 龙虎榜：个股上榜记录（最近days天内） ----------
+export async function getBillboard(code, { days = 30, limit = 5 } = {}) {
+  try {
+    const since = new Date(Date.now() - days * 86400e3).toISOString().slice(0, 10);
+    const filter = encodeURIComponent('(SECURITY_CODE="' + code + '")(TRADE_DATE>=\'' + since + '\')');
+    const d = await httpJson(`https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_DAILYBILLBOARD_DETAILSNEW&columns=TRADE_DATE,SECURITY_CODE,SECURITY_NAME_ABBR,EXPLANATION,BILLBOARD_NET_AMT,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,CHANGE_RATE,ACCUM_AMOUNT&filter=${filter}&pageSize=${limit}&sortColumns=TRADE_DATE&sortTypes=-1&source=WEB&client=WEB`,
+      { headers: { Referer: 'https://data.eastmoney.com/' } });
+    return (d?.result?.data || []).map(x => ({
+      date: (x.TRADE_DATE || '').slice(0, 10),
+      reason: x.EXPLANATION,                 // 上榜原因
+      netAmtWan: +((x.BILLBOARD_NET_AMT || 0) / 1e4).toFixed(0),   // 龙虎榜净买额(万)
+      buyAmtWan: +((x.BILLBOARD_BUY_AMT || 0) / 1e4).toFixed(0),
+      sellAmtWan: +((x.BILLBOARD_SELL_AMT || 0) / 1e4).toFixed(0),
+      chgPct: x.CHANGE_RATE != null ? +x.CHANGE_RATE.toFixed(2) : null,
+    }));
+  } catch { return []; }
+}
+
+// ---------- 龙虎榜：席位明细（游资/机构身份） ----------
+export async function getBillboardSeats(code, { date, limit = 10 } = {}) {
+  try {
+    let filter = '(SECURITY_CODE="' + code + '")';
+    if (date) filter += "(TRADE_DATE='" + date + "')";
+    const d = await httpJson(`https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_BILLBOARD_DAILYDETAILSBUY&columns=TRADE_DATE,OPERATEDEPT_NAME,BUY,SELL,NET,EXPLANATION,RISE_PROBABILITY_3DAY&filter=${encodeURIComponent(filter)}&pageSize=${limit}&sortColumns=NET&sortTypes=-1&source=WEB&client=WEB`,
+      { headers: { Referer: 'https://data.eastmoney.com/' } });
+    return (d?.result?.data || []).map(x => ({
+      date: (x.TRADE_DATE || '').slice(0, 10),
+      dept: classifySeat(x.OPERATEDEPT_NAME || ''),
+      name: (x.OPERATEDEPT_NAME || '').replace(/证券股份有限公司|股份有限公司|证券营业部/g, '').slice(0, 24),
+      buyWan: +((x.BUY || 0) / 1e4).toFixed(0),
+      sellWan: +((x.SELL || 0) / 1e4).toFixed(0),
+      netWan: +((x.NET || 0) / 1e4).toFixed(0),
+      riseProb3d: x.RISE_PROBABILITY_3DAY != null ? +x.RISE_PROBABILITY_3DAY.toFixed(1) : null,
+    }));
+  } catch { return []; }
+}
+
+// 席位分类：机构 / 知名游资 / 普通营业部
+const FAMOUS_SEATS = ['章盟主', '赵老哥', '炒股养家', '孙哥', '方新侠', '量化打板', '深南东路', '溧阳路', '拉萨团结路', '拉萨东环路', '拉萨金珠西路', '拉萨金融城南环路', '华鑫上海分', '中信上海溧阳路', '国泰海通上海江苏路', '银河绍兴', '财通杭州上塘路', '国盛宁波桑田路', '东方财富拉萨', '沪股通', '深股通', '北向'];
+function classifySeat(name) {
+  if (!name) return '未知';
+  if (name.includes('机构专用')) return '机构';
+  if (/股通/.test(name)) return '北向';
+  for (const f of FAMOUS_SEATS) if (name.includes(f)) return '知名游资';
+  return '营业部';
+}
+
 // 交易日历：用上证指数日K判断最近交易日
 export async function lastTradeDate() {
   const ks = await getDailyKline('000001', 3); // 平安银行K线日期即交易日

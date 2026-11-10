@@ -1,6 +1,6 @@
 // 候选池构建：真实活跃股排行 → 过滤 → 附加K线技术面/新闻/公告/财务
 import { CFG } from './config.js';
-import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast } from './market.js';
+import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast, getBillboard, getBillboardSeats } from './market.js';
 import { sma, rsi, macd } from './util.js';
 
 function passFilter(x, heldCodes) {
@@ -63,11 +63,12 @@ export async function buildCandidates(heldCodes = new Set()) {
     const q = quotes[x.code];
     if (!q || q.price <= 0) continue;
     try {
-      const [kl, news, ann, fund, trend, concepts, margin, forecast] = await Promise.all([
+      const [kl, news, ann, fund, trend, concepts, margin, forecast, billboard] = await Promise.all([
         getDailyKline(x.code, 60), getNews(x.name, x.code, 3),
         getAnnouncements(x.code, 3), getFundamentals(x.code),
         getIntradayTrend(x.code, 25), getConcepts(x.code, 6),
         getMargin(x.code), getProfitForecast(x.code),
+        getBillboard(x.code, { days: 30, limit: 3 }),
       ]);
       const tech = technicals(kl);
       if (!tech) continue;
@@ -86,7 +87,13 @@ export async function buildCandidates(heldCodes = new Set()) {
         concepts,
         margin: margin ? { rzyeYi: +(margin.rzye / 1e8).toFixed(1), rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2), date: margin.date } : null,
         forecast: forecast.slice(0, 2),
+        billboard,   // 近30天龙虎榜上榜记录
       });
+      // 若近期上过榜，追加最新一次上榜的席位明细（游资身份）
+      if (billboard.length) {
+        const seats = await getBillboardSeats(x.code, { date: billboard[0].date, limit: 8 }).catch(() => []);
+        out[out.length - 1].billboardSeats = seats;
+      }
     } catch {}
   }
   return out;
