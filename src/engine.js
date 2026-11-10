@@ -5,7 +5,7 @@ import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, l
 import { getQuotes, getDailyKline, getMarketRegime } from './market.js';
 import { decide, riskCheck, limitUp, limitDown } from './strategy.js';
 import { calcShares } from './sizing.js';
-import { dailyReflection } from './evolve.js';
+import { dailyReflection, reviewLessons, autoGovern, recordCitation, settleOnSell, loadLessons, saveLessons } from './evolve.js';
 import { buildDailyReport, saveDailyReport } from './report.js';
 import { sleep, appendLog } from './util.js';
 import fs from 'node:fs';
@@ -67,6 +67,16 @@ async function runDecisionRound(force = false) {
     deciding = false;
   }
 }
+// 卖出结算：把这笔真实盈亏记到买入时引用的经验上（证据驱动的经验评估）
+function settleLessons(pos, profit) {
+  if (!pos || !Array.isArray(pos.lessonIds) || !pos.lessonIds.length) return;
+  try {
+    const lstore = loadLessons();
+    settleOnSell(lstore, pos.lessonIds, profit);
+    saveLessons(lstore);
+  } catch {}
+}
+
 // 账户级回撤熔断：本金是命根子，净值自高点回撤越大防守越重
 function drawdownGuard(quotes) {
   const eq = equityOf(state, quotes);
@@ -95,8 +105,12 @@ async function _runDecisionRound(force = false) {
     const q = quotes[ro.code];
     if (!q) continue;
     if (limitDown(q)) { logEvent(state, `跌停无法卖出 ${ro.code}：${ro.reason}`); continue; }
+    const posBefore = state.positions[ro.code];
     const r = doSell(state, { code: ro.code, price: q.price, reason: '[风控]' + ro.reason, quoteTime: q.time });
-    if (r.ok) logDecision(state, { type: 'RISK_SELL', code: ro.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: ro.reason });
+    if (r.ok) {
+      settleLessons(posBefore, r.trade.profit);
+      logDecision(state, { type: 'RISK_SELL', code: ro.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: ro.reason });
+    }
   }
 
   // 熔断halt模式：不再问LLM买入，只做风控卖出，省token也保本金
@@ -136,9 +150,14 @@ async function _runDecisionRound(force = false) {
         const eq = equityOf(state, quotes);
         const sz = calcShares({ equity: eq, cash: state.cash, price: q.price, klines, regime: regime.regime, extraMul: guard.extraMul });
         if (sz.shares < 100) { logEvent(state, `仓位不足1手跳过 ${a.code}: ${sz.reason}`); continue; }
-        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason });
+        const usedLessons = Array.isArray(a.usedLessons) ? a.usedLessons.filter(x => typeof x === 'string').slice(0, 5) : [];
+        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason, lessonIds: usedLessons });
         if (r.ok) {
-          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '', sizing: sz.reason, stopPrice: sz.stopPrice, posPct: (sz.positionPct*100).toFixed(1)+'%' });
+          // 经验引用记账：citations++（证据链，供收盘审计裁决）
+          const lstore = loadLessons();
+          recordCitation(lstore, usedLessons, bjDate());
+          saveLessons(lstore);
+          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '', sizing: sz.reason, stopPrice: sz.stopPrice, posPct: (sz.positionPct*100).toFixed(1)+'%', usedLessons });
         } else logEvent(state, `买入失败 ${a.code}: ${r.err}`);
       } else if (a.type === 'SELL' && a.code && state.positions[a.code]) {
         const p = state.positions[a.code];
@@ -146,8 +165,12 @@ async function _runDecisionRound(force = false) {
         const q = (await getQuotes([a.code]))[a.code];
         if (!q) continue;
         if (limitDown(q)) { logEvent(state, `跌停卖不出 ${a.code}`); continue; }
+        const posBefore = state.positions[a.code];
         const r = doSell(state, { code: a.code, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time });
-        if (r.ok) logDecision(state, { type: 'LLM_SELL', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: a.reason || '' });
+        if (r.ok) {
+          settleLessons(posBefore, r.trade.profit);
+          logDecision(state, { type: 'LLM_SELL', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: a.reason || '', usedLessons: Array.isArray(a.usedLessons) ? a.usedLessons : [] });
+        }
       } else if (a.type === 'HOLD' && a.code) {
         logDecision(state, { type: 'HOLD', code: a.code, name: a.name || '', reason: a.reason || '' });
       }
@@ -177,8 +200,12 @@ async function _closeOfDay() {
         const p = state.positions[code];
         const q = qs[code];
         if (!p || !q || p.buyDate === today || limitDown(q)) continue;
+        const posBefore = state.positions[code];
         const r = doSell(state, { code, price: q.price, reason: '[到期清仓]实验结束', quoteTime: q.time });
-        if (r.ok) logDecision(state, { type: 'FINAL_SELL', code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: '实验期结束清仓' });
+        if (r.ok) {
+          settleLessons(posBefore, r.trade.profit);
+          logDecision(state, { type: 'FINAL_SELL', code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: '实验期结束清仓' });
+        }
       }
       persist(state);
     }
@@ -196,15 +223,37 @@ async function _closeOfDay() {
   logEvent(state, `收盘净值 ${equity.toFixed(2)} (${((equity/base-1)*100).toFixed(2)}%)`);
   persist(state);
 
-  // 每日复盘进化：LLM总结当天涨跌经验 → lessons.json → 注入次日决策
+  // 每日复盘进化三段式：①教练生成候选经验 → ②程序硬规则治理 → ③独立审计官凭战绩裁决
   let reflection = null;
   try {
     reflection = await dailyReflection(state, { quotes });
-    if (reflection.lessons.length) logEvent(state, `复盘新增${reflection.lessons.length}条经验: ${reflection.lessons.join('；').slice(0, 150)}`);
+    if (reflection.lessons.length) logEvent(state, `复盘新增${reflection.lessons.length}条候选经验: ${reflection.lessons.join('；').slice(0, 120)}`);
     else logEvent(state, '复盘完成，无新增经验');
     persist(state);
   } catch (e) {
     logEvent(state, '复盘失败: ' + e.message);
+    persist(state);
+  }
+
+  // ② 程序硬规则：证据达标自动转正 / 战绩证伪自动淘汰 / 超上限降级
+  try {
+    const lstore = loadLessons();
+    const autoActs = autoGovern(lstore, today);
+    saveLessons(lstore);
+    if (autoActs.length) logEvent(state, `经验治理(程序): ${autoActs.join('；').slice(0, 150)}`);
+  } catch (e) {
+    logEvent(state, '经验治理失败: ' + e.message);
+  }
+
+  // ③ 独立审计官：凭实战战绩逐条裁决去留（与生成者分离，防"自己证明自己"）
+  try {
+    const audit = await reviewLessons(state);
+    if (audit.acts?.length) logEvent(state, `经验审计: ${audit.acts.join('；').slice(0, 180)}`);
+    else if (!audit.error) logEvent(state, `经验审计: 复核${audit.reviewed}条，全部保留`);
+    state.lastAudit = { date: today, reviewed: audit.reviewed || 0, acts: audit.acts || [], summary: audit.summary || '' };
+    persist(state);
+  } catch (e) {
+    logEvent(state, '经验审计失败: ' + e.message);
     persist(state);
   }
 

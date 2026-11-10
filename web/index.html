@@ -75,8 +75,13 @@ h2 .cnt{font-size:12px;color:var(--dim);font-weight:400}
 <h2><span class="ico">🧾</span>交易流水<span class="cnt" id="tradeCount"></span></h2>
 <div class="card"><table id="tradeTbl"><thead><tr><th>时间</th><th>方向</th><th>股票</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th><th>盈亏</th><th>理由</th></tr></thead><tbody></tbody></table></div>
 
-<h2><span class="ico">🧠</span>经验库<span class="cnt">每日复盘进化</span></h2>
-<div class="card"><div id="reflect" class="small" style="margin-bottom:6px"></div><table id="lessonTbl"><tbody></tbody></table></div>
+<h2><span class="ico">🧠</span>经验库<span class="cnt" id="lessonCounts"></span></h2>
+<div class="card">
+<div id="reflect" class="small" style="margin-bottom:6px"></div>
+<div id="lastAudit" class="small" style="margin-bottom:8px"></div>
+<table id="lessonTbl"><thead><tr><th style="width:96px">ID</th><th style="width:70px">状态</th><th>经验内容</th><th style="width:52px">引用</th><th style="width:88px">战绩(胜/了结)</th><th style="width:70px">净盈亏</th></tr></thead><tbody></tbody></table>
+<div class="pager"><span class="small">状态流转：candidate试用 →(战绩达标/审计通过)→ active启用 →(战绩证伪/过时/冗余)→ retired淘汰 ｜ 收盘自动三段治理：教练生成→程序硬规则→独立审计官裁决</span></div>
+</div>
 
 <h2><span class="ico">🕐</span>决策 / 事件日志<span class="cnt" id="decCount"></span></h2>
 <div class="card">
@@ -132,10 +137,7 @@ async function refresh(){
   document.getElementById('tradeCount').textContent = `(共${d.trades.length}笔)`;
   const tb = document.querySelector('#tradeTbl tbody');
   tb.innerHTML = d.trades.length ? d.trades.slice().reverse().slice(0,50).map(t=>`<tr><td class="small">${t.ts}</td><td><span class="badge ${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'买入':'卖出'}</span></td><td><b>${t.name}</b><br><span class="small">${t.code}</span></td><td>${t.price}</td><td>${t.shares}</td><td>${t.amount}</td><td>${t.fee}</td><td class="${(t.profit||0)>=0?'pos':'neg'}">${t.profit!=null?(t.profit>=0?'+':'')+t.profit:'-'}</td><td class="reason">${t.reason||''}${t.sizing?'<br><span class="small">仓位: '+t.sizing+'</span>':''}</td></tr>`).join('') : '<tr><td colspan="9" class="small">尚无交易</td></tr>';
-  const ls = d.lessons||{items:[],reflections:[]};
-  const rf = (ls.reflections||[]).slice(-1)[0];
-  document.getElementById('reflect').innerHTML = rf?`最新复盘(${rf.date}): ${rf.summary}`:'';
-  document.querySelector('#lessonTbl tbody').innerHTML = (ls.items||[]).length ? ls.items.slice().reverse().map(x=>`<tr><td class="small" style="width:60px">${x.date.slice(5)}</td><td class="reason" style="max-width:none;color:var(--txt)">${x.text}${x.fixed?'<br><span class="small">'+x.fixed+'</span>':''}</td></tr>`).join('') : '<tr><td class="small">尚无经验</td></tr>';
+  loadLessons();
   buildDecRows(d);
  }catch(e){console.error(e)}
 }
@@ -182,6 +184,27 @@ function decSizeChange(v){ decPageSize=parseInt(v)||20; decPage=1; renderDec(); 
 
 async function forceDecide(){await fetch('/api/decide',{method:'POST'});setTimeout(refresh,3000)}
 
+// ---------- 经验库治理视图 ----------
+const ST_LABEL={active:['启用','var(--green)'],candidate:['试用','var(--gold)'],retired:['淘汰','var(--dim)']};
+async function loadLessons(){
+ try{
+  const d=await(await fetch('/api/lessons')).json();
+  document.getElementById('lessonCounts').textContent=`(启用${d.counts.active} · 试用${d.counts.candidate} · 淘汰${d.counts.retired})`;
+  const rf=(d.reflections||[])[0];
+  document.getElementById('reflect').innerHTML=rf?`最新复盘(${rf.date}): ${rf.summary}`:'';
+  const la=d.lastAudit;
+  document.getElementById('lastAudit').innerHTML=la?`🕵️ 最近审计(${la.date}): 复核${la.reviewed}条 ${la.summary||''}${la.acts&&la.acts.length?' ｜ '+la.acts.join('；'):''}`:'';
+  const all=[...d.items.active,...d.items.candidate,...d.items.retired];
+  const tb=document.querySelector('#lessonTbl tbody');
+  tb.innerHTML=all.length?all.map(x=>{
+    const st=ST_LABEL[x.status]||['?','var(--dim)'];
+    const wr=x.trades?`<span class="${x.wins/x.trades>=0.5?'pos':'neg'}">${x.wins}/${x.trades}</span>`:'<span class="small">未了结</span>';
+    const hist=(x.history||[]).length?`<br><span class="small">履历: ${x.history.slice(-2).map(h=>h.date.slice(5)+' '+h.act+(h.why?'('+h.why.slice(0,24)+')':'')).join(' → ')}</span>`:'';
+    return `<tr${x.status==='retired'?' style="opacity:.45"':''}><td class="small">${x.id}</td><td><span style="color:${st[1]};border:1px solid ${st[1]};padding:0 6px;border-radius:8px;font-size:11px">${st[0]}</span></td><td class="reason" style="max-width:none;color:var(--txt)">${x.text}${hist}</td><td>${x.citations}</td><td>${wr}</td><td class="${x.netPnl>0?'pos':x.netPnl<0?'neg':'small'}">${x.netPnl?((x.netPnl>0?'+':'')+x.netPnl):'-'}</td></tr>`;
+  }).join(''):'<tr><td colspan="6" class="small">尚无经验</td></tr>';
+ }catch(e){console.error(e)}
+}
+
 let reports=[], activeReport=0;
 function mdToHtml(md){
  return md
@@ -218,6 +241,7 @@ function showReport(i){
 }
 refresh(); setInterval(refresh, 30000);
 loadReports(); setInterval(loadReports, 300000);
+loadLessons(); setInterval(loadLessons, 120000);
 </script>
 </body>
 </html>

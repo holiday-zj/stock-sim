@@ -25,6 +25,22 @@ export function startServer() {
         return res.end(fs.readFileSync(path.join(WEB, 'index.html')));
       }
       if (u.pathname === '/api/status') return json(res, 200, status());
+      if (u.pathname === '/api/lessons') {
+        const ls = loadLessons();
+        const st = getState();
+        const byStatus = { active: [], candidate: [], retired: [] };
+        for (const it of ls.items) (byStatus[it.status] || byStatus.retired).push({
+          id: it.id, date: it.date, text: it.text, status: it.status,
+          citations: it.citations, trades: it.trades, wins: it.wins,
+          winRate: it.trades ? +((it.wins / it.trades) * 100).toFixed(0) : null,
+          netPnl: it.netPnl, lastCited: it.lastCited, history: (it.history || []).slice(-4),
+        });
+        return json(res, 200, {
+          counts: { active: byStatus.active.length, candidate: byStatus.candidate.length, retired: byStatus.retired.length },
+          items: byStatus, lastAudit: st.lastAudit || null,
+          reflections: (ls.reflections || []).slice(-10).reverse(),
+        });
+      }
       if (u.pathname === '/api/reports') {
         const n = Math.min(+(u.searchParams.get('n') || 40), 120);
         return json(res, 200, { reports: getReports(n) });
@@ -61,6 +77,11 @@ export function startServer() {
       if (u.pathname === '/api/decide' && req.method === 'POST') {
         manualDecision().then(() => {}).catch(() => {});
         return json(res, 200, { ok: true, msg: '已触发决策回合' });
+      }
+      if (u.pathname === '/api/audit' && req.method === 'POST') {
+        const { reviewLessons } = await import('./evolve.js');
+        const r = await reviewLessons(getState());
+        return json(res, 200, r);
       }
       if (u.pathname === '/api/close' && req.method === 'POST') {
         await manualClose();

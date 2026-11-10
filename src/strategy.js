@@ -1,7 +1,7 @@
 // 决策核心：把真实市场数据交给 LLM，输出买卖决策（JSON）
 import { CFG } from './config.js';
 import { llmChat } from './llm.js';
-import { lessonsForPrompt } from './evolve.js';
+import { lessonsForDecision } from './evolve.js';
 import { chandelierStop, atrPct } from './sizing.js';
 import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats } from './market.js';
 import { buildCandidates } from './picker.js';
@@ -34,7 +34,8 @@ const SYS = `你是一名顶尖A股短线交易大师，融合利弗莫尔的趋
 - 买入数量必须是100股整数倍，且不超过可用现金。
 
 输出严格JSON：
-{"actions":[{"type":"BUY","code":"600000","name":"浦发银行","reason":"50字内"},{"type":"SELL","code":"...","name":"...","reason":"..."},{"type":"HOLD","code":"...","name":"...","reason":"..."}],"summary":"100字内总体思路"}`;
+{"actions":[{"type":"BUY","code":"600000","name":"浦发银行","reason":"50字内","usedLessons":["L20261110-1"]},{"type":"SELL","code":"...","name":"...","reason":"...","usedLessons":[]},{"type":"HOLD","code":"...","name":"...","reason":"..."}],"summary":"100字内总体思路"}
+usedLessons：本次动作实际应用到的历史经验id数组（从【历史经验教训】的id里选，只填真正影响了本决策的，没有则空数组）。系统会按交易结果给这些经验记战绩，虚报引用会污染经验库评估。`;
 
 function heldSnapshot(s, quotes) {
   return Object.entries(s.positions).map(([code, p]) => {
@@ -113,8 +114,8 @@ export async function decide(s, opts = {}) {
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
 【候选股(按流动性筛出的活跃股,含真实技术面/新闻/公告/财务)】${JSON.stringify(candidates)}
 注：pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi/rzyeYi 单位为亿元；mainNet/rzjmeWan 为主力净流入(元)/融资净买入(万元)；concepts[].pct 为板块当日涨幅百分点；intraday.tail 为最近分钟分时[时间,价,量,均价]；forecast 为业绩预告(预增/预减+幅度%)；billboard 为近30天龙虎榜上榜记录(净买额万元)；billboardSeats 为席位明细(dept=机构/知名游资/北向/营业部，netWan净买万元，riseProb3d该席位3日胜率%)。龙虎榜代表大资金博弈：机构/知名游资大额净买入是加分项，上榜次日高开需谨慎（利好兑现出货）。
-【历史经验教训(每日复盘沉淀，优先级高于直觉，与盘面冲突时以盘面为准)】
-${lessonsForPrompt(15).map(t => '- ' + t).join('\n') || '- (尚无)'}
+【历史经验教训(经过审计裁决存活的经验；(试用)=尚在验证期。优先级高于直觉，与盘面冲突时以盘面为准)】
+${lessonsForDecision().map(x => '- ' + x.line).join('\n') || '- (尚无)'}
 
 请给出本轮操作。注意：候选股"price"为最新价，买入将按该价+0.1%滑点成交；持仓 canSellToday=false 表示T+1锁定不能卖。若无需操作，actions 输出 HOLD 或空数组。`;
 

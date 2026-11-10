@@ -25,7 +25,7 @@ export function loadState() {
 export function persist(s) { saveJson(F, s); }
 
 // 市价买入（按快照价+滑点，整百股）
-export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares: wantShares, stopPrice, sizingNote }) {
+export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares: wantShares, stopPrice, sizingNote, lessonIds }) {
   if (price <= 0) return { ok: false, err: 'invalid price' };
   const exec = execBuyPrice(price);
   const eq = equityOf(s, quotes || {});
@@ -53,6 +53,7 @@ export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares:
       name, shares, costPrice: +((cost + fee) / shares).toFixed(4),
       buyTime: bjStamp(), buyDate: bjStamp().slice(0, 10), high: exec, buyReason: reason,
       stopPrice: stopPrice || null, sizingNote: sizingNote || null,
+      lessonIds: Array.isArray(lessonIds) ? lessonIds.slice(0, 5) : [],
     };
   }
   s.cash = +(s.cash - cost - fee).toFixed(2);
