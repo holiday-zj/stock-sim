@@ -121,6 +121,7 @@ async function _runDecisionRound(force = false) {
     } catch (e) { logEvent(state, `执行异常 ${a?.code}: ${e.message}`); }
   }
   if (decision?.summary) logDecision(state, { type: 'SUMMARY', summary: decision.summary });
+  if (decision?.__reasoning) logDecision(state, { type: 'THINKING', text: String(decision.__reasoning).slice(0, 1000) });
   persist(state);
 }
 

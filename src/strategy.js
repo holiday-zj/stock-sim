@@ -2,7 +2,7 @@
 import { CFG } from './config.js';
 import { llmChat } from './llm.js';
 import { lessonsForPrompt } from './evolve.js';
-import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements } from './market.js';
+import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin } from './market.js';
 import { buildCandidates } from './picker.js';
 import { sma, rsi } from './util.js';
 
@@ -53,9 +53,14 @@ async function enrichHeld(s, quotes) {
   // 持仓票补充：K线技术面 + 最新新闻
   const out = [];
   for (const code of Object.keys(s.positions)) {
-    const kl = await getDailyKline(code, 40).catch(() => null);
+    const [kl, news, trend, concepts, margin] = await Promise.all([
+      getDailyKline(code, 40).catch(() => null),
+      getNews(s.positions[code].name, code, 3).catch(() => []),
+      getIntradayTrend(code, 20).catch(() => null),
+      getConcepts(code, 5).catch(() => []),
+      getMargin(code).catch(() => null),
+    ]);
     const closes = (kl || []).map(k => k.close);
-    const news = await getNews(s.positions[code].name, code, 3).catch(() => []);
     out.push({
       code,
       tech: closes.length >= 20 ? {
@@ -64,6 +69,9 @@ async function enrichHeld(s, quotes) {
         chg5d: +((closes.at(-1) / closes.at(-6) - 1) * 100).toFixed(1),
       } : null,
       news: news.slice(0, 2).map(n => `${n.date} ${n.title}`),
+      intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-10) } : null,
+      concepts,
+      margin: margin ? { rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2) } : null,
     });
   }
   return out;
@@ -87,13 +95,13 @@ export async function decide(s, opts = {}) {
 【持仓明细】${JSON.stringify(heldSnap)}
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
 【候选股(按流动性筛出的活跃股,含真实技术面/新闻/公告/财务)】${JSON.stringify(candidates)}
-注：所有 pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi 单位为亿元；mainNet 为主力净流入(元)。
+注：pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi/rzyeYi 单位为亿元；mainNet/rzjmeWan 为主力净流入(元)/融资净买入(万元)；concepts[].pct 为板块当日涨幅百分点；intraday.tail 为最近分钟分时[时间,价,量,均价]；forecast 为业绩预告(预增/预减+幅度%)。
 【历史经验教训(每日复盘沉淀，优先级高于直觉，与盘面冲突时以盘面为准)】
 ${lessonsForPrompt(15).map(t => '- ' + t).join('\n') || '- (尚无)'}
 
 请给出本轮操作。注意：候选股"price"为最新价，买入将按该价+0.1%滑点成交；持仓 canSellToday=false 表示T+1锁定不能卖。若无需操作，actions 输出 HOLD 或空数组。`;
 
-  const decision = await llmChat(SYS, user, { timeout: 90000 });
+  const decision = await llmChat(SYS, user, { timeout: 240000 });
   return { decision, candidates, quotes, indices, sectors, heldSnap };
 }
 

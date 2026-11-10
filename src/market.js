@@ -163,6 +163,68 @@ export async function getSectorRank(limit = 5) {
   } catch { return { top: [], bottom: [] }; }
 }
 
+// ---------- 当日分时（1分钟：时间,价,量,均价）——日内节奏/尾盘异动 ----------
+export async function getIntradayTrend(code, tailMinutes = 40) {
+  try {
+    const d = await httpJson(`${EM}/stock/trends2/get?secid=${secid(code)}&fields1=f1,f2,f3,f8&fields2=f51,f53,f56,f58&iscr=0&ndays=1`);
+    const tr = d?.data?.trends;
+    const preClose = d?.data?.preClose;
+    if (!tr || !tr.length) return null;
+    const tail = tr.slice(-tailMinutes).map(line => {
+      const [t, p, v, avg] = line.split(',');
+      return { t: t.slice(11), p: +p, v: +v, avg: +avg };
+    });
+    const last = tr[tr.length - 1].split(',');
+    return {
+      preClose, points: tr.length,
+      lastPrice: +last[1], lastTime: last[0].slice(11),
+      tail,   // 最近N分钟明细，LLM可看日内节奏
+    };
+  } catch { return null; }
+}
+
+// ---------- 所属概念板块及板块当日涨幅 ----------
+export async function getConcepts(code, limit = 8) {
+  try {
+    const d = await httpJson(`${EM}/slist/get?spt=3&fltt=2&invt=2&fields=f3,f12,f14&secid=${secid(code)}&pn=1&pz=${limit}&po=1&np=1`);
+    return (d?.data?.diff || [])
+      .filter(x => x.f14 && !/板块$/.test(x.f14))   // 去掉地域板块
+      .slice(0, limit)
+      .map(x => ({ name: x.f14, pct: x.f3 }));      // pct为百分点
+  } catch { return []; }
+}
+
+// ---------- 融资融券（最新一日） ----------
+export async function getMargin(code) {
+  try {
+    const d = await httpJson(`https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPTA_WEB_RZRQ_GGMX&columns=DATE,RZYE,RZMRE,RZCHE,RZJME,RQYE,RZRQYE,RZYEZB&filter=${encodeURIComponent(`(scode="${code}")`)}&pageSize=1&sortColumns=DATE&sortTypes=-1`,
+      { headers: { Referer: 'https://data.eastmoney.com/' } });
+    const x = d?.result?.data?.[0];
+    if (!x) return null;
+    return {
+      date: (x.DATE || '').slice(0, 10),
+      rzye: x.RZYE,        // 融资余额
+      rzmre: x.RZMRE,      // 融资买入额
+      rzjme: x.RZJME,      // 融资净买入
+      rzyezb: x.RZYEZB,    // 融资余额占流通市值%
+    };
+  } catch { return null; }
+}
+
+// ---------- 业绩预告/快报（最近2条） ----------
+export async function getProfitForecast(code) {
+  try {
+    const d = await httpJson(`https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_PUBLIC_OP_NEWPREDICT&columns=SECURITY_CODE,PREDICT_TYPE,ADD_AMP_LOWER,ADD_AMP_UPPER,PREDICT_FINANCE_CODE,NOTICE_DATE&filter=${encodeURIComponent(`(SECURITY_CODE="${code}")`)}&pageSize=2&sortColumns=NOTICE_DATE&sortTypes=-1`,
+      { headers: { Referer: 'https://data.eastmoney.com/' } });
+    const cutoff = Date.now() - 180 * 86400e3;
+    return (d?.result?.data || []).map(x => ({
+      date: (x.NOTICE_DATE || '').slice(0, 10),
+      type: x.PREDICT_TYPE,                 // 预增/预减/扭亏/不确定...
+      ampLower: x.ADD_AMP_LOWER, ampUpper: x.ADD_AMP_UPPER,
+    })).filter(x => x.date && new Date(x.date).getTime() > cutoff);  // 半年内的才有效，老数据会误导决策
+  } catch { return []; }
+}
+
 // 交易日历：用上证指数日K判断最近交易日
 export async function lastTradeDate() {
   const ks = await getDailyKline('000001', 3); // 平安银行K线日期即交易日

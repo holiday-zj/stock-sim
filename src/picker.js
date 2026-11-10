@@ -1,6 +1,6 @@
 // 候选池构建：真实活跃股排行 → 过滤 → 附加K线技术面/新闻/公告/财务
 import { CFG } from './config.js';
-import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals } from './market.js';
+import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast } from './market.js';
 import { sma, rsi, macd } from './util.js';
 
 function passFilter(x, heldCodes) {
@@ -63,9 +63,11 @@ export async function buildCandidates(heldCodes = new Set()) {
     const q = quotes[x.code];
     if (!q || q.price <= 0) continue;
     try {
-      const [kl, news, ann, fund] = await Promise.all([
+      const [kl, news, ann, fund, trend, concepts, margin, forecast] = await Promise.all([
         getDailyKline(x.code, 60), getNews(x.name, x.code, 3),
         getAnnouncements(x.code, 3), getFundamentals(x.code),
+        getIntradayTrend(x.code, 25), getConcepts(x.code, 6),
+        getMargin(x.code), getProfitForecast(x.code),
       ]);
       const tech = technicals(kl);
       if (!tech) continue;
@@ -79,6 +81,11 @@ export async function buildCandidates(heldCodes = new Set()) {
         tech, fund,
         news: news.slice(0, 3),
         ann: ann.slice(0, 3),
+        // 增强数据：日内分时节奏 / 概念板块(名称+当日涨幅) / 融资融券 / 业绩预告
+        intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-12) } : null,
+        concepts,
+        margin: margin ? { rzyeYi: +(margin.rzye / 1e8).toFixed(1), rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2), date: margin.date } : null,
+        forecast: forecast.slice(0, 2),
       });
     } catch {}
   }
