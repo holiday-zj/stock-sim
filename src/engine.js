@@ -26,13 +26,23 @@ function inDecisionWindow() {
   return hm >= CFG.loop.firstDecision && hm <= CFG.loop.lastDecision;
 }
 
-async function ensureTradeDays() {
+async function ensureTradeDays(force = false) {
   const now = Date.now();
-  if (tradeDays && now - tradeDays.fetchedAt < 30 * 60e3) return tradeDays.days;
+  if (!force && tradeDays && now - tradeDays.fetchedAt < 5 * 60e3) return tradeDays.days;
   const ks = await getDailyKline('000001', 40);
   if (!ks) return tradeDays?.days || [];
   tradeDays = { today: bjDate(), fetchedAt: now, days: ks.map(k => k.date) };
   return tradeDays.days;
+}
+// 兜底判断：工作日+大盘快照时间是今天 → 今天就是交易日（当日K线开盘初期可能还没生成）
+async function looksLikeTradeDay() {
+  const n = bjNow();
+  const dow = n.getDay();
+  if (dow === 0 || dow === 6) return false;
+  try {
+    const idx = await getIndices();
+    return !!(idx && idx.length);
+  } catch { return false; }
 }
 function heldTradeDays(buyDate) {
   const days = tradeDays?.days || [];
@@ -151,7 +161,18 @@ async function tick() {
     await ensureTradeDays();
     const days = tradeDays?.days || [];
     const today = bjDate();
-    const isTradeDay = days.includes(today);
+    let isTradeDay = days.includes(today);
+    // 开盘初期当日K线可能还没生成 → 交易时段内强刷日历；仍缺则按工作日兜底
+    // （实验期2026-11-10~12-10内中国无法定假日，工作日=交易日成立）
+    if (!isTradeDay && inTradeWindow()) {
+      await ensureTradeDays(true);
+      isTradeDay = (tradeDays?.days || []).includes(today);
+      if (!isTradeDay) {
+        const dow = bjNow().getDay();
+        isTradeDay = dow !== 0 && dow !== 6;
+        if (isTradeDay) logEvent(state, `交易日历缺当日K线，按工作日兜底判定为交易日 ${today}`);
+      }
+    }
 
     if (isTradeDay) {
       if (inDecisionWindow()) await runDecisionRound();
