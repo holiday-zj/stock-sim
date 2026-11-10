@@ -103,7 +103,7 @@ async function _runDecisionRound(force = false) {
         const q = (await getQuotes([a.code]))[a.code];
         if (!q || q.price <= 0) { logEvent(state, `行情缺失，忽略买入 ${a.code}`); continue; }
         if (limitUp(q)) { logEvent(state, `涨停买不进 ${a.code} ${q.price}`); continue; }
-        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time });
+        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes });
         if (r.ok) {
           logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '' });
         } else logEvent(state, `买入失败 ${a.code}: ${r.err}`);

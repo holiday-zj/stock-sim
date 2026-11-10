@@ -16,6 +16,7 @@ export const CFG = {
   risk: {
     maxPositions: 3,          // 最多同时持仓数（10万本金）
     maxPosPct: 0.35,          // 单票仓位 ≤ 总资产35%
+    minCashReserve: 0.15,     // 现金底线：买入后现金不得低于总资产15%（T+1下保留机动弹药）
     stopLoss: -0.06,          // 硬止损 -6%（程序强制，不问LLM）
     trailTrigger: 0.10,       // 浮盈 ≥10% 启动移动止盈
     trailGiveback: 0.035,     // 高点回撤 3.5% 触发卖出

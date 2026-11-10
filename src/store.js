@@ -25,12 +25,14 @@ export function loadState() {
 export function persist(s) { saveJson(F, s); }
 
 // 市价买入（按快照价+滑点，整百股）
-export function doBuy(s, { code, name, price, reason, quoteTime }) {
+export function doBuy(s, { code, name, price, reason, quoteTime, quotes }) {
   if (price <= 0) return { ok: false, err: 'invalid price' };
   const exec = execBuyPrice(price);
-  const budget = Math.min(s.cash, equityOf(s, {}) * CFG.risk.maxPosPct);
+  const eq = equityOf(s, quotes || {});
+  const reserve = eq * (CFG.risk.minCashReserve || 0);   // 现金底线（程序强制）
+  const budget = Math.min(s.cash - reserve, eq * CFG.risk.maxPosPct);
   let shares = Math.floor(budget / (exec * 100)) * 100;
-  if (shares < 100) return { ok: false, err: '资金不足1手' };
+  if (shares < 100) return { ok: false, err: budget < 0 ? '现金低于15%底线，禁止买入' : '资金不足1手' };
   let cost = shares * exec;
   let fee = buyFees(cost);
   // 佣金最低5元可能让总额超预算，回退100股
