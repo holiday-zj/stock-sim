@@ -2,8 +2,9 @@
 import { CFG } from './config.js';
 import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
-import { getQuotes, getDailyKline } from './market.js';
+import { getQuotes, getDailyKline, getMarketRegime } from './market.js';
 import { decide, riskCheck, limitUp, limitDown } from './strategy.js';
+import { calcShares } from './sizing.js';
 import { dailyReflection } from './evolve.js';
 import { sleep, appendLog } from './util.js';
 import fs from 'node:fs';
@@ -65,13 +66,30 @@ async function runDecisionRound(force = false) {
     deciding = false;
   }
 }
+// 账户级回撤熔断：本金是命根子，净值自高点回撤越大防守越重
+function drawdownGuard(quotes) {
+  const eq = equityOf(state, quotes);
+  if (!state.peakEquity || eq > state.peakEquity) state.peakEquity = eq;
+  const dd = eq / (state.peakEquity || CFG.startCash) - 1;
+  if (dd <= CFG.risk.ddHalt) return { mode: 'halt', dd, eq, extraMul: 0 };
+  if (dd <= CFG.risk.ddDefensive) return { mode: 'defensive', dd, eq, extraMul: 0.5 };
+  return { mode: 'normal', dd, eq, extraMul: 1 };
+}
+
 async function _runDecisionRound(force = false) {
   lastDecisionTs = Date.now();
   const codes = Object.keys(state.positions);
   const quotes = codes.length ? await getQuotes(codes) : {};
+  const guard = drawdownGuard(quotes);
 
-  // 1) 程序风控优先（止损/止盈/超期强制卖出，不问LLM）
-  const riskOrders = riskCheck(state, quotes, (code) => heldTradeDays(state.positions[code]?.buyDate || ''));
+  // 1) 程序风控优先（吊灯止损/保本线/时间止损，强制卖出，不问LLM）
+  const klCache = new Map();
+  const getKlines = async (code) => {
+    if (!klCache.has(code)) klCache.set(code, await getDailyKline(code, 30));
+    return klCache.get(code);
+  };
+  const riskOrders = await riskCheck(state, quotes, (code) => heldTradeDays(state.positions[code]?.buyDate || ''), getKlines);
+  persist(state);  // 保存上抬后的止损线
   for (const ro of riskOrders) {
     const q = quotes[ro.code];
     if (!q) continue;
@@ -80,10 +98,19 @@ async function _runDecisionRound(force = false) {
     if (r.ok) logDecision(state, { type: 'RISK_SELL', code: ro.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: ro.reason });
   }
 
-  // 2) LLM 决策
+  // 熔断halt模式：不再问LLM买入，只做风控卖出，省token也保本金
+  if (guard.mode === 'halt') {
+    logEvent(state, `回撤熔断：净值自高点回撤${(guard.dd*100).toFixed(1)}%≤-8%，停止新开仓，只执行风控离场`);
+    persist(state);
+    return;
+  }
+
+  // 2) LLM 决策（带大盘趋势体制+回撤状态）
+  const regime = await getMarketRegime().catch(() => ({ regime: 'unknown', detail: '获取失败' }));
+  const maxPos = (CFG.risk.regimeMaxPos || {})[regime.regime] ?? CFG.risk.maxPositions;
   let decision;
   try {
-    const res = await decide(state, { quotes: await getQuotes(Object.keys(state.positions)), nowBJ: bjStamp() });
+    const res = await decide(state, { quotes: await getQuotes(Object.keys(state.positions)), nowBJ: bjStamp(), regime, maxPos, guard });
     decision = res.decision;
     // 刷新行情引用
     Object.assign(quotes, res.quotes);
@@ -97,15 +124,20 @@ async function _runDecisionRound(force = false) {
   for (const a of actions) {
     try {
       if (a.type === 'BUY' && a.code) {
-        if (Object.keys(state.positions).length >= CFG.risk.maxPositions && !state.positions[a.code]) {
-          logEvent(state, `仓位已满，忽略买入 ${a.code}`); continue;
+        if (Object.keys(state.positions).length >= maxPos && !state.positions[a.code]) {
+          logEvent(state, `仓位已满(${regime.regime}体制上限${maxPos}只)，忽略买入 ${a.code}`); continue;
         }
         const q = (await getQuotes([a.code]))[a.code];
         if (!q || q.price <= 0) { logEvent(state, `行情缺失，忽略买入 ${a.code}`); continue; }
         if (limitUp(q)) { logEvent(state, `涨停买不进 ${a.code} ${q.price}`); continue; }
-        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes });
+        // 专业仓位：ATR波动率 + 固定风险比例(1.5%/笔)，而非顶格买
+        const klines = await getKlines(a.code).catch(() => null);
+        const eq = equityOf(state, quotes);
+        const sz = calcShares({ equity: eq, cash: state.cash, price: q.price, klines, regime: regime.regime, extraMul: guard.extraMul });
+        if (sz.shares < 100) { logEvent(state, `仓位不足1手跳过 ${a.code}: ${sz.reason}`); continue; }
+        const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason });
         if (r.ok) {
-          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '' });
+          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '', sizing: sz.reason, stopPrice: sz.stopPrice, posPct: (sz.positionPct*100).toFixed(1)+'%' });
         } else logEvent(state, `买入失败 ${a.code}: ${r.err}`);
       } else if (a.type === 'SELL' && a.code && state.positions[a.code]) {
         const p = state.positions[a.code];
@@ -120,6 +152,7 @@ async function _runDecisionRound(force = false) {
       }
     } catch (e) { logEvent(state, `执行异常 ${a?.code}: ${e.message}`); }
   }
+  logDecision(state, { type: 'REGIME', regime: regime.regime, detail: regime.detail, dd: +(guard.dd*100).toFixed(2)+'%', guard: guard.mode });
   if (decision?.summary) logDecision(state, { type: 'SUMMARY', summary: decision.summary });
   if (decision?.__reasoning) logDecision(state, { type: 'THINKING', text: String(decision.__reasoning).slice(0, 1000) });
   persist(state);
@@ -234,11 +267,15 @@ export function manualDecision() { return runDecisionRound(true); }
 export function manualClose() { closedToday = false; return closeOfDay(); }
 export function getState() { return state; }
 export function status() {
+  const eq = equityOf(state, {});
+  const peak = state.peakEquity || CFG.startCash;
   return {
     running, stopped, bjNow: bjStamp(),
     tradeDay: (tradeDays?.days || []).includes(bjDate()),
     inWindow: inTradeWindow(),
-    equity: equityOf(state, {}),
+    equity: eq,
+    peakEquity: peak,
+    drawdownPct: +((eq / peak - 1) * 100).toFixed(2),
     cash: state.cash,
     positions: Object.keys(state.positions).length,
     trades: state.trades.length,

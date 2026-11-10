@@ -25,14 +25,14 @@ export function loadState() {
 export function persist(s) { saveJson(F, s); }
 
 // 市价买入（按快照价+滑点，整百股）
-export function doBuy(s, { code, name, price, reason, quoteTime, quotes }) {
+export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares: wantShares, stopPrice, sizingNote }) {
   if (price <= 0) return { ok: false, err: 'invalid price' };
   const exec = execBuyPrice(price);
   const eq = equityOf(s, quotes || {});
   const reserve = eq * (CFG.risk.minCashReserve || 0);   // 现金底线（程序强制）
   const budget = Math.min(s.cash - reserve, eq * CFG.risk.maxPosPct);
-  let shares = Math.floor(budget / (exec * 100)) * 100;
-  if (shares < 100) return { ok: false, err: budget < 0 ? '现金低于15%底线，禁止买入' : '资金不足1手' };
+  let shares = wantShares != null ? Math.floor(wantShares / 100) * 100 : Math.floor(budget / (exec * 100)) * 100;
+  if (shares < 100) return { ok: false, err: budget < 0 ? '现金低于底线，禁止买入' : (wantShares != null ? '风险预算不足1手' : '资金不足1手') };
   let cost = shares * exec;
   let fee = buyFees(cost);
   // 佣金最低5元可能让总额超预算，回退100股
@@ -47,10 +47,12 @@ export function doBuy(s, { code, name, price, reason, quoteTime, quotes }) {
     old.shares += shares;
     old.costPrice = +(totalCost / old.shares).toFixed(4);
     old.high = Math.max(old.high, exec);
+    if (stopPrice) old.stopPrice = stopPrice;
   } else {
     s.positions[code] = {
       name, shares, costPrice: +((cost + fee) / shares).toFixed(4),
       buyTime: bjStamp(), buyDate: bjStamp().slice(0, 10), high: exec, buyReason: reason,
+      stopPrice: stopPrice || null, sizingNote: sizingNote || null,
     };
   }
   s.cash = +(s.cash - cost - fee).toFixed(2);

@@ -5,10 +5,15 @@ import { bjStamp } from '../src/env.js';
 import { getQuotes } from '../src/market.js';
 import { limitUp, limitDown } from '../src/strategy.js';
 
+import { getMarketRegime, getDailyKline } from '../src/market.js';
+import { calcShares } from '../src/sizing.js';
+import { equityOf } from '../src/store.js';
 const dryRun = process.argv.includes('--dry');
 const s = loadState();
 console.log('账户: 现金', s.cash, '持仓', Object.keys(s.positions));
-const res = await decide(s, { nowBJ: bjStamp() });
+const regime = await getMarketRegime().catch(() => ({ regime: 'unknown', detail: '获取失败' }));
+console.log('大盘体制:', regime.regime, '|', regime.detail);
+const res = await decide(s, { nowBJ: bjStamp(), regime, maxPos: 3 });
 console.log('\n=== LLM 决策 ===');
 console.log(JSON.stringify(res.decision, null, 1));
 console.log('\n候选股:', res.candidates.map(c => `${c.name}(${c.code}) ${c.price} ${c.pct}%`).join(', '));
@@ -21,7 +26,10 @@ for (const a of res.decision?.actions || []) {
     const q = (await getQuotes([a.code]))[a.code];
     if (!q) { console.log('行情缺失', a.code); continue; }
     if (limitUp(q)) { console.log('涨停买不进', a.code); continue; }
-    const r = doBuy(s, { code: a.code, name: q.name, price: q.price, reason: a.reason, quoteTime: q.time });
+    const kl = await getDailyKline(a.code, 30);
+    const sz = calcShares({ equity: equityOf(s, {}), cash: s.cash, price: q.price, klines: kl, regime: regime.regime });
+    console.log('  仓位计算:', sz.reason);
+    const r = doBuy(s, { code: a.code, name: q.name, price: q.price, reason: a.reason, quoteTime: q.time, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason });
     console.log(r.ok ? `买入 ${r.trade.name} ${r.trade.shares}股 @${r.trade.price} 费${r.trade.fee}` : '买入失败: ' + r.err);
     if (r.ok) logDecision(s, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, reason: a.reason });
   } else if (a.type === 'SELL' && a.code && s.positions[a.code]) {

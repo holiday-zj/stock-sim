@@ -14,13 +14,28 @@ export const CFG = {
   },
 
   risk: {
-    maxPositions: 3,          // 最多同时持仓数（10万本金）
-    maxPosPct: 0.35,          // 单票仓位 ≤ 总资产35%
-    minCashReserve: 0.15,     // 现金底线：买入后现金不得低于总资产15%（T+1下保留机动弹药）
-    stopLoss: -0.06,          // 硬止损 -6%（程序强制，不问LLM）
+    // —— 仓位规模：固定风险比例法(2%法则) + ATR波动率仓位(海龟法则核心) ——
+    riskPerTrade: 0.015,      // 单笔风险预算 = 总资产1.5%（本金是命根子，保守取值）
+    regimeRiskMul: { risk_on: 1.0, neutral: 0.6, risk_off: 0.3 },  // 顺势调仓：大盘弱→预算大砍
+    regimeMaxPos: { risk_on: 3, neutral: 2, risk_off: 1 },          // 弱势时持仓数也收缩
+    // —— 账户级回撤熔断（保本金的最后防线）——
+    ddDefensive: -0.05,       // 净值自高点回撤≥5% → 防守模式：风险预算再减半
+    ddHalt: -0.08,            // 回撤≥8% → 熔断：停止一切新买入，只管存量止损
+    atrMultiple: 2.0,         // 初始止损距离 = max(stopFloor, 2×ATR%)
+    stopFloor: 0.05,          // 止损距离下限5%（短线紧止损，砍亏损要快）
+    stopCeil: 0.12,           // 止损距离上限12%
+    atrPeriod: 14,            // ATR周期
+    chandelier: 3.0,          // 吊灯止损：持仓期最高价 - 3×ATR（趋势走完前不出局，利润奔跑）
+    breakevenAt: 0.05,        // 浮盈≥5%后止损抬到保本价（绝不让盈利单变亏损单）
+    // —— 组合级约束（叠加在单笔仓位之上）——
+    maxPositions: 3,          // 最多同时持仓数
+    maxPosPct: 0.35,          // 单票硬顶 ≤ 总资产35%（防低波动股仓位过大）
+    minCashReserve: 0.15,     // 现金底线 ≥ 总资产15%
+    // —— 离场 ——
+    stopLoss: -0.06,          // 兜底固定止损（无ATR数据时用）
     trailTrigger: 0.10,       // 浮盈 ≥10% 启动移动止盈
     trailGiveback: 0.035,     // 高点回撤 3.5% 触发卖出
-    maxHoldTradeDays: 12,     // 最长持有12个交易日，强制复盘清仓
+    maxHoldTradeDays: 12,     // 最长持有12个交易日
   },
 
   picker: {

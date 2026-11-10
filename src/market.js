@@ -272,6 +272,55 @@ function classifySeat(name) {
   return '营业部';
 }
 
+// ---------- 指数日K（指数secid固定：上证1.000001 深成0.399001 创业板0.399006）----------
+export async function getIndexKline(idxSecid = '1.000001', days = 40, attempt = 1) {
+  try {
+    const d = await httpJson(`${EMH}/stock/kline/get?secid=${idxSecid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=${days}`);
+    const ks = d?.data?.klines;
+    if (!ks || !ks.length) throw new Error('no klines');
+    return ks.map(line => {
+      const [date, open, close, high, low, vol, amount] = line.split(',');
+      return { date, open: +open, close: +close, high: +high, low: +low, vol: +vol, amount: +amount };
+    });
+  } catch {
+    if (attempt < 3) { await new Promise(r => setTimeout(r, 700 * attempt)); return getIndexKline(idxSecid, days, attempt + 1); }
+    return null;
+  }
+}
+
+// ---------- 大盘趋势体制：决定该进攻还是防守（顺势而为是短线盈亏第一杠杆）----------
+// 返回 regime: 'risk_on'(强,放手做多) / 'neutral'(中性,精选) / 'risk_off'(弱,降仓/空仓)
+export async function getMarketRegime() {
+  const [sh, cyb] = await Promise.all([
+    getIndexKline('1.000001', 30),
+    getIndexKline('0.399006', 30),
+  ]);
+  if (!sh || sh.length < 20) return { regime: 'unknown', detail: '指数K线缺失' };
+  const closes = sh.map(k => k.close);
+  const last = closes.at(-1);
+  const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const ma10 = closes.slice(-10).reduce((a, b) => a + b, 0) / 10;
+  const ma20prev = closes.slice(-25, -5).length >= 20 ? closes.slice(-25, -5).reduce((a, b) => a + b, 0) / 20 : ma20;
+  const ma20up = ma20 > ma20prev;                       // MA20向上=中期趋势多头
+  const aboveMa20 = last > ma20;
+  const aboveMa10 = last > ma10;
+  const chg5 = last / closes.at(-6) - 1;
+
+  let score = 0;
+  if (aboveMa20) score++;
+  if (aboveMa10) score++;
+  if (ma20up) score++;
+  if (chg5 > 0) score++;
+  const regime = score >= 3 ? 'risk_on' : (score <= 1 ? 'risk_off' : 'neutral');
+  const cybNote = cyb ? `创业板${(cyb.at(-1).close / cyb.at(-6).close - 1) > 0 ? '强' : '弱'}` : '';
+  return {
+    regime, score,
+    sh: +last.toFixed(0), ma20: +ma20.toFixed(0),
+    aboveMa20, aboveMa10, ma20up, chg5: +(chg5 * 100).toFixed(2),
+    detail: `上证${last.toFixed(0)} ${aboveMa20 ? '站上' : '跌破'}MA20(${ma20.toFixed(0)}) MA20${ma20up ? '向上' : '走平/向下'} 5日${(chg5*100).toFixed(1)}% ${cybNote} → ${regime}`,
+  };
+}
+
 // 交易日历：用上证指数日K判断最近交易日
 export async function lastTradeDate() {
   const ks = await getDailyKline('000001', 3); // 平安银行K线日期即交易日
