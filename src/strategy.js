@@ -3,7 +3,7 @@ import { CFG } from './config.js';
 import { llmChat } from './llm.js';
 import { lessonsForDecision } from './evolve.js';
 import { chandelierStop, atrPct } from './sizing.js';
-import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats, getSentiment } from './market.js';
+import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats, getSentiment, getFundFlow, getOrderBook, getConceptLeaders } from './market.js';
 import { buildCandidates } from './picker.js';
 import { sma, rsi } from './util.js';
 
@@ -66,13 +66,15 @@ async function enrichHeld(s, quotes) {
   // 持仓票补充：K线技术面 + 最新新闻
   const out = [];
   for (const code of Object.keys(s.positions)) {
-    const [kl, news, trend, concepts, margin, billboard] = await Promise.all([
+    const [kl, news, trend, concepts, margin, billboard, fundFlow, orderBook] = await Promise.all([
       getDailyKline(code, 40).catch(() => null),
       getNews(s.positions[code].name, code, 3).catch(() => []),
       getIntradayTrend(code, 20).catch(() => null),
       getConcepts(code, 5).catch(() => []),
       getMargin(code).catch(() => null),
       getBillboard(code, { days: 10, limit: 2 }).catch(() => []),
+      getFundFlow(code, 30).catch(() => null),
+      getOrderBook(code).catch(() => null),
     ]);
     const closes = (kl || []).map(k => k.close);
     out.push({
@@ -87,6 +89,8 @@ async function enrichHeld(s, quotes) {
       concepts,
       margin: margin ? { rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2) } : null,
       billboard: billboard.length ? await getBillboardSeats(code, { date: billboard[0].date, limit: 6 }).catch(() => billboard) : [],
+      fundFlow,
+      orderBook: orderBook ? { bid1: orderBook.bid1, ask1: orderBook.ask1, spread: orderBook.spread, weiBi: orderBook.weiBi, note: orderBook.note } : null,
     });
   }
   return out;
@@ -99,12 +103,13 @@ export async function decide(s, opts = {}) {
   const maxPos = opts.maxPos || CFG.risk.maxPositions;
   const guard = opts.guard || { mode: 'normal', dd: 0 };
   const quotes = opts.quotes || await getQuotes([...heldCodes]);
-  const [indices, sectors, candidates, heldSnap, heldExtra, sentiment] = await Promise.all([
+  const [indices, sectors, candidates, heldSnap, heldExtra, sentiment, leaders] = await Promise.all([
     getIndices(), getSectorRank(4),
     opts.skipCandidates ? Promise.resolve([]) : buildCandidates(heldCodes),
     Promise.resolve(heldSnapshot(s, quotes)),
     enrichHeld(s, quotes),
     getSentiment().catch(() => null),
+    getConceptLeaders(6).catch(() => []),
   ]);
 
   const user = `【账户】现金 ${s.cash.toFixed(0)}元；持仓市值约 ${(heldSnap.reduce((a, h) => a + h.price * h.shares, 0)).toFixed(0)}元。当前时间 ${opts.nowBJ}。持仓上限${maxPos}只(随大盘体制调整)。
@@ -114,10 +119,13 @@ export async function decide(s, opts = {}) {
 【账户回撤状态】自净值高点回撤${(guard.dd*100).toFixed(1)}%，模式=${guard.mode}${guard.mode==='defensive'?'（防守模式：风险预算已减半，只做最高确定性的机会）':''}。回撤≥8%将触发熔断停止开新仓。
 【大盘】${(indices || []).map(i => `${i.name} ${i.price}(${(i.pct*100).toFixed(2)}%)`).join('；') || '数据缺失'}
 【板块】领涨: ${(sectors?.top || []).join('、')}；领跌: ${(sectors?.bottom || []).join('、')}
+【题材梯队(概念排行:涨幅/涨跌家数/龙头)】${(leaders || []).map(l => `${l.name}+${l.pct}%(涨${l.up}跌${l.down})龙头${l.leader}+${l.leaderPct}%`).join('；') || '缺失'}
 【持仓明细】${JSON.stringify(heldSnap)}
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
 【候选股(按流动性筛出的活跃股,含真实技术面/新闻/公告/财务)】${JSON.stringify(candidates)}
 注：pct/turnover/profitYoy/grossMargin 等比率为小数（0.1277=12.77%）；amountYi/floatMcapYi/rzyeYi 单位为亿元；mainNet/rzjmeWan 为主力净流入(元)/融资净买入(万元)；concepts[].pct 为板块当日涨幅百分点；intraday.tail 为最近分钟分时[时间,价,量,均价]；forecast 为业绩预告(预增/预减+幅度%)；billboard 为近30天龙虎榜上榜记录(净买额万元)；billboardSeats 为席位明细(dept=机构/知名游资/北向/营业部，netWan净买万元，riseProb3d该席位3日胜率%)。龙虎榜代表大资金博弈：机构/知名游资大额净买入是加分项，上榜次日高开需谨慎（利好兑现出货）。
+fundFlow 为逐分钟主力资金(totalMainWan当日累计净流入万元/recentMainWan最近5分钟/trend近8分钟走势)——**主力持续流出而股价横盘=出货嫌疑，是卖出信号；主力加速流入+价格未大涨=潜在启动**。orderBook 为五档盘口(weiBi委比%：>20买盘强承接好，<-20抛压重；spread价差大=流动性差慎入)。
+对手盘思维：每次买入前问"谁在卖给我、为什么卖"——龙虎榜大额买入的游资次日要兑现、主力流出的横盘股有人在悄悄出货、涨停开板时接的是谁的货。想不清楚对手盘就放弃这笔交易。
 【历史经验教训(经过审计裁决存活的经验；(试用)=尚在验证期。优先级高于直觉，与盘面冲突时以盘面为准)】
 ${lessonsForDecision().map(x => '- ' + x.line).join('\n') || '- (尚无)'}
 

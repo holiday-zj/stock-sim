@@ -2,7 +2,28 @@
 import { CFG } from './config.js';
 import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
-import { getQuotes, getDailyKline, getMarketRegime } from './market.js';
+import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes } from './market.js';
+
+// 实时报价：腾讯源优先(3秒级)，东财延时兜底——止损/成交价判断必须用实时价
+async function bestQuotes(codes) {
+  if (!codes.length) return {};
+  const [rt, em] = await Promise.all([
+    getRealtimeQuotes(codes).catch(() => ({})),
+    getQuotes(codes).catch(() => ({})),
+  ]);
+  const out = { ...em };
+  const now = Date.now();
+  for (const c of codes) {
+    const r = rt[c];
+    // 腾讯数据新鲜(90秒内)才覆盖，防止休市/异常时用到陈旧价
+    if (r && r.price > 0 && (!r.ts || now - r.ts < 90e3)) {
+      out[c] = { ...(out[c] || {}), ...r, realtime: true };
+    } else if (out[c]) {
+      out[c].realtime = false;
+    }
+  }
+  return out;
+}
 import { decide, riskCheck, limitUp, limitDown } from './strategy.js';
 import { calcShares } from './sizing.js';
 import { dailyReflection, reviewLessons, autoGovern, recordCitation, settleOnSell, loadLessons, saveLessons } from './evolve.js';
@@ -77,6 +98,42 @@ function settleLessons(pos, profit) {
   } catch {}
 }
 
+// 盘中快速风控扫描：实时价 vs 止损线，触发即卖（不等LLM决策轮，30s级响应）
+let sweeping = false;
+async function riskSweep() {
+  if (sweeping || deciding) return;   // 与决策回合互斥
+  sweeping = true;
+  try {
+    const codes = Object.keys(state.positions).filter(c => state.positions[c].buyDate !== bjDate());
+    if (!codes.length) return;
+    const quotes = await bestQuotes(codes);
+    const orders = [];
+    for (const code of codes) {
+      const p = state.positions[code];
+      const q = quotes[code];
+      if (!p || !q || !q.price) continue;
+      if (p.high < q.price) p.high = q.price;
+      const stopPx = p.stopPrice;
+      if (stopPx && q.price <= stopPx) {
+        orders.push({ code, reason: `实时风控止损：${q.price}≤止损线${stopPx}` });
+      }
+    }
+    for (const ro of orders) {
+      const q = quotes[ro.code];
+      if (limitDown(q)) continue;
+      const posBefore = state.positions[ro.code];
+      const r = doSell(state, { code: ro.code, price: q.price, reason: '[实时风控]' + ro.reason, quoteTime: q.time });
+      if (r.ok) {
+        settleLessons(posBefore, r.trade.profit);
+        logDecision(state, { type: 'RISK_SELL', code: ro.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, profit: r.trade.profit, reason: ro.reason });
+        logEvent(state, ro.reason);
+      }
+    }
+    if (orders.length) persist(state);
+  } catch {}
+  finally { sweeping = false; }
+}
+
 // 账户级回撤熔断：本金是命根子，净值自高点回撤越大防守越重
 function drawdownGuard(quotes) {
   const eq = equityOf(state, quotes);
@@ -90,7 +147,7 @@ function drawdownGuard(quotes) {
 async function _runDecisionRound(force = false) {
   lastDecisionTs = Date.now();
   const codes = Object.keys(state.positions);
-  const quotes = codes.length ? await getQuotes(codes) : {};
+  const quotes = codes.length ? await bestQuotes(codes) : {};
   const guard = drawdownGuard(quotes);
 
   // 1) 程序风控优先（吊灯止损/保本线/时间止损，强制卖出，不问LLM）
@@ -125,7 +182,7 @@ async function _runDecisionRound(force = false) {
   const maxPos = (CFG.risk.regimeMaxPos || {})[regime.regime] ?? CFG.risk.maxPositions;
   let decision;
   try {
-    const res = await decide(state, { quotes: await getQuotes(Object.keys(state.positions)), nowBJ: bjStamp(), regime, maxPos, guard });
+    const res = await decide(state, { quotes: await bestQuotes(Object.keys(state.positions)), nowBJ: bjStamp(), regime, maxPos, guard });
     decision = res.decision;
     // 刷新行情引用
     Object.assign(quotes, res.quotes);
@@ -142,7 +199,7 @@ async function _runDecisionRound(force = false) {
         if (Object.keys(state.positions).length >= maxPos && !state.positions[a.code]) {
           logEvent(state, `仓位已满(${regime.regime}体制上限${maxPos}只)，忽略买入 ${a.code}`); continue;
         }
-        const q = (await getQuotes([a.code]))[a.code];
+        const q = (await bestQuotes([a.code]))[a.code];
         if (!q || q.price <= 0) { logEvent(state, `行情缺失，忽略买入 ${a.code}`); continue; }
         if (limitUp(q)) { logEvent(state, `涨停买不进 ${a.code} ${q.price}`); continue; }
         // 专业仓位：ATR波动率 + 固定风险比例(1.5%/笔)，而非顶格买
@@ -162,7 +219,7 @@ async function _runDecisionRound(force = false) {
       } else if (a.type === 'SELL' && a.code && state.positions[a.code]) {
         const p = state.positions[a.code];
         if (p.buyDate === bjDate()) { logEvent(state, `T+1锁定，无法卖 ${a.code}`); continue; }
-        const q = (await getQuotes([a.code]))[a.code];
+        const q = (await bestQuotes([a.code]))[a.code];
         if (!q) continue;
         if (limitDown(q)) { logEvent(state, `跌停卖不出 ${a.code}`); continue; }
         const posBefore = state.positions[a.code];
@@ -195,7 +252,7 @@ async function _closeOfDay() {
   if (today === CFG.runEnd) {
     const codes = Object.keys(state.positions);
     if (codes.length) {
-      const qs = await getQuotes(codes);
+      const qs = await bestQuotes(codes);
       for (const code of codes) {
         const p = state.positions[code];
         const q = qs[code];
@@ -211,7 +268,7 @@ async function _closeOfDay() {
     }
   }
   const codes = Object.keys(state.positions);
-  const quotes = codes.length ? await getQuotes(codes) : {};
+  const quotes = codes.length ? await bestQuotes(codes) : {};
   const equity = equityOf(state, quotes);
   const base = CFG.startCash;
   state.daily.push({
@@ -297,6 +354,8 @@ async function tick() {
     }
 
     if (isTradeDay) {
+      // 盘中独立风控轮询：不依赖LLM决策间隔，用实时价盯止损线（30s级响应跳水）
+      if (inTradeWindow() && Object.keys(state.positions).length) await riskSweep();
       if (inDecisionWindow()) await runDecisionRound();
       // 收盘后记净值（15:00~23:59 之间第一次tick）
       if (bjHM() >= '15:05' && !closedToday) { closedToday = true; await closeOfDay(); }

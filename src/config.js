@@ -47,7 +47,7 @@ export const CFG = {
   },
 
   loop: {
-    pollSec: 90,               // 行情轮询间隔
+    pollSec: 30,               // 引擎心跳(实时风控扫描止损线)
     decisionMinGapMin: 20,     // LLM决策最小间隔（分钟）
     firstDecision: '09:35',
     lastDecision: '14:40',

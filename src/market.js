@@ -381,6 +381,85 @@ function sentimentPhase(s) {
   return '修复(可低吸主线核心股，控制节奏)';
 }
 
+// ---------- 实时行情（腾讯源，真·实时~3秒，用于风控价格判断） ----------
+export async function getRealtimeQuotes(codes) {
+  const out = {};
+  if (!codes || !codes.length) return out;
+  for (let i = 0; i < codes.length; i += 50) {
+    const batch = codes.slice(i, i + 50);
+    try {
+      const txt = await httpTextGbk(`https://qt.gtimg.cn/q=${batch.map(tencentSym).join(',')}`);
+      for (const line of txt.split(';')) {
+        const m = line.match(/v_\w+="([^"]*)"/);
+        if (!m || !m[1]) continue;
+        const f = m[1].split('~');
+        const code = f[2];
+        if (!code || !f[3]) continue;
+        const t = f[30] || '';
+        out[code] = {
+          code, name: f[1], price: +f[3], preClose: +f[4], open: +f[5],
+          chg: +f[31], pct: +f[32] / 100, high: +f[33], low: +f[34],
+          volume: +f[6] * 100, amount: +f[37] * 10000,
+          time: t.length >= 14 ? `${t.slice(8,10)}:${t.slice(10,12)}:${t.slice(12,14)}` : null,
+          ts: t.length >= 14 ? Date.parse(`${t.slice(0,4)}-${t.slice(4,6)}-${t.slice(6,8)}T${t.slice(8,10)}:${t.slice(10,12)}:${t.slice(12,14)}+08:00`) : 0,
+        };
+      }
+    } catch {}
+  }
+  return out;
+}
+
+// ---------- 五档盘口（东财，价差/委比/挂单压力，判断买卖盘真实意愿） ----------
+export async function getOrderBook(code) {
+  try {
+    const d = await httpJson(`${EM}/stock/get?secid=${secid(code)}&fields=f19,f20,f17,f18,f11,f12,f31,f32,f39,f40,f531`);
+    const x = d?.data;
+    if (!x || x.f19 == null) return null;
+    const px = v => v == null ? null : +(v / 100).toFixed(3);
+    const bids = [[x.f19,x.f20],[x.f17,x.f18],[x.f15,x.f16],[x.f13,x.f14],[x.f11,x.f12]];  // 买一~买五 [价,量(手)]
+    const asks = [[x.f31,x.f32],[x.f33,x.f34],[x.f35,x.f36],[x.f37,x.f38],[x.f39,x.f40]];  // 卖一~卖五
+    const bidVol = bids.reduce((a,b)=>a+(b[1]||0),0), askVol = asks.reduce((a,b)=>a+(b[1]||0),0);
+    const weiBi = (bidVol+askVol)>0 ? +(((bidVol-askVol)/(bidVol+askVol))*100).toFixed(1) : 0;  // 委比%
+    return {
+      bid1: px(x.f19), ask1: px(x.f31), spread: +(px(x.f31)-px(x.f19)).toFixed(3),
+      bids: bids.map(b=>({p:px(b[0]),v:b[1]})), asks: asks.map(a=>({p:px(a[0]),v:a[1]})),
+      bidVol, askVol, weiBi,   // 委比>0买盘强，<0卖盘强
+      note: weiBi>20?'买盘明显占优(承接强)':weiBi<-20?'卖盘明显占优(抛压重)':'买卖均衡',
+    };
+  } catch { return null; }
+}
+
+// ---------- 逐分钟主力资金流（东财fflow，累计净流入，判断主力真买真卖） ----------
+export async function getFundFlow(code, minutes = 30) {
+  try {
+    const d = await httpJson(`${EM}/stock/fflow/kline/get?secid=${secid(code)}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55&klt=1&lmt=${minutes}`);
+    const ks = d?.data?.klines;
+    if (!ks || !ks.length) return null;
+    const rows = ks.map(l => { const [t,main,small,mid,big]=l.split(','); return { t:t.slice(11), main:+main, big:+big }; });
+    const last = rows.at(-1).main;
+    const prev5 = rows.length>=6 ? rows.at(-6).main : rows[0].main;
+    const recent = last - prev5;   // 最近5分钟主力净流入增量
+    return {
+      totalMainWan: +(last/1e4).toFixed(0),       // 当日累计主力净流入(万)
+      recentMainWan: +(recent/1e4).toFixed(0),     // 最近5分钟主力净流入(万)
+      bigWan: +(rows.at(-1).big/1e4).toFixed(0),   // 累计大单净流入(万)
+      trend: rows.slice(-8).map(r=>+(r.main/1e4).toFixed(0)),  // 主力净流入走势(万)
+      note: recent>500?'主力近5分钟加速流入':recent<-500?'主力近5分钟加速流出':'主力资金平稳',
+    };
+  } catch { return null; }
+}
+
+// ---------- 题材梯队（概念板块排行+领涨股，判断主线与卡位） ----------
+export async function getConceptLeaders(limit = 8) {
+  try {
+    const d = await httpJson(`${EM}/clist/get?pn=1&pz=${limit}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f3,f14,f104,f105,f128,f136,f140`);
+    return (d?.data?.diff || []).filter(x => typeof x.f3 === 'number' && !/昨日|连板|百元|高送|次新|标准普尔|富时|MSCI|机构重仓|基金重仓|社保|QFII|预盈预增|预亏预减|股权激励|转债/.test(x.f14)).map(x => ({
+      name: x.f14, pct: +x.f3.toFixed(2), up: x.f104, down: x.f105,
+      leader: x.f128, leaderPct: x.f136, leaderCode: x.f140,
+    })).slice(0, limit);
+  } catch { return []; }
+}
+
 // 交易日历：用上证指数日K判断最近交易日
 export async function lastTradeDate() {
   const ks = await getDailyKline('000001', 3); // 平安银行K线日期即交易日

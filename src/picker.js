@@ -1,6 +1,6 @@
 // 候选池构建：真实活跃股排行 → 过滤 → 附加K线技术面/新闻/公告/财务
 import { CFG } from './config.js';
-import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast, getBillboard, getBillboardSeats } from './market.js';
+import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast, getBillboard, getBillboardSeats, getFundFlow, getOrderBook } from './market.js';
 import { sma, rsi, macd } from './util.js';
 
 function passFilter(x, heldCodes) {
@@ -96,5 +96,14 @@ export async function buildCandidates(heldCodes = new Set()) {
       }
     } catch {}
   }
+  // 资金流+五档盘口：只对最终入选的候选拉取（控制请求量）
+  await Promise.all(out.map(async (c) => {
+    const [ff, ob] = await Promise.all([
+      getFundFlow(c.code, 30).catch(() => null),
+      getOrderBook(c.code).catch(() => null),
+    ]);
+    c.fundFlow = ff;
+    c.orderBook = ob ? { bid1: ob.bid1, ask1: ob.ask1, spread: ob.spread, weiBi: ob.weiBi, note: ob.note } : null;
+  }));
   return out;
 }
