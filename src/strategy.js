@@ -3,7 +3,7 @@ import { CFG } from './config.js';
 import { llmChat } from './llm.js';
 import { lessonsForDecision } from './evolve.js';
 import { chandelierStop, atrPct } from './sizing.js';
-import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats } from './market.js';
+import { getIndices, getSectorRank, getQuotes, getDailyKline, getNews, getAnnouncements, getIntradayTrend, getConcepts, getMargin, getBillboard, getBillboardSeats, getSentiment } from './market.js';
 import { buildCandidates } from './picker.js';
 import { sma, rsi } from './util.js';
 
@@ -14,6 +14,7 @@ const SYS = `你是一名顶尖A股短线交易大师，融合利弗莫尔的趋
 3. 20次击球卡——一个月只有少数几个"肥球"(主线题材爆发+龙头启动+大盘配合)。没有肥球就空仓等待，空仓不丢人，乱出手才丢人。宁可错过十次，不可做错一次。
 4. 只买龙头——板块爆发时买最强的那只(涨幅居前、量能最大、逻辑最正宗)，不买跟风杂毛。真瓶颈环节(有订单/扩产公告佐证)>蹭热点。
 5. 顺势而为——大盘risk_off体制下收缩防守(持仓上限降为1只)，risk_on下才放手进攻。逆势做多等于推石头上山。
+6. 情绪周期择时——A股短线是情绪市：涨停家数/连板高度/炸板率/昨日涨停溢价构成"冰点→修复→发酵→高潮→退潮"循环。发酵期重拳出击，高潮期只碰龙头，退潮期空仓就是赚。炸板率>40%或昨涨停今均<0说明接力资金亏钱，再好的个股形态也要降权。
 你必须遵守的现实约束：
 - T+1：当天买入的股票当天不能卖，最早次日卖出。
 - 涨跌停：主板±10%、创业板±20%；涨停买不进、跌停卖不出。
@@ -98,15 +99,18 @@ export async function decide(s, opts = {}) {
   const maxPos = opts.maxPos || CFG.risk.maxPositions;
   const guard = opts.guard || { mode: 'normal', dd: 0 };
   const quotes = opts.quotes || await getQuotes([...heldCodes]);
-  const [indices, sectors, candidates, heldSnap, heldExtra] = await Promise.all([
+  const [indices, sectors, candidates, heldSnap, heldExtra, sentiment] = await Promise.all([
     getIndices(), getSectorRank(4),
     opts.skipCandidates ? Promise.resolve([]) : buildCandidates(heldCodes),
     Promise.resolve(heldSnapshot(s, quotes)),
     enrichHeld(s, quotes),
+    getSentiment().catch(() => null),
   ]);
 
   const user = `【账户】现金 ${s.cash.toFixed(0)}元；持仓市值约 ${(heldSnap.reduce((a, h) => a + h.price * h.shares, 0)).toFixed(0)}元。当前时间 ${opts.nowBJ}。持仓上限${maxPos}只(随大盘体制调整)。
 【大盘趋势体制】${regime.regime}（${regime.detail}）——risk_on可积极进攻，neutral只做精选强势股，risk_off应防守/减仓/空仓等待，逆势重仓是短线最大亏损来源。
+【市场情绪周期】${sentiment ? `${sentiment.phase}｜涨停${sentiment.ztCount}家 最高${sentiment.maxBoard}板 炸板率${sentiment.zbRate}% 昨涨停今均${sentiment.yztAvgPct}%(红盘率${sentiment.yztUpRate}%) 平均封单${sentiment.ztAvgSeal}亿 隔夜外盘:${(sentiment.overseas||[]).join(' ')}${sentiment.topBoards?.length ? ' 高位梯队:' + sentiment.topBoards.join('、') : ''}` : '缺失'}
+情绪周期用法：冰点→轻仓/空仓等转折；修复→低吸主线核心；发酵→积极做多(当前赚钱效应扩散期)；高潮→只做最强龙头且警惕次日分歧；退潮→坚决防守不接力。情绪与大盘体制共振时信号最强，背离时以防守为准。
 【账户回撤状态】自净值高点回撤${(guard.dd*100).toFixed(1)}%，模式=${guard.mode}${guard.mode==='defensive'?'（防守模式：风险预算已减半，只做最高确定性的机会）':''}。回撤≥8%将触发熔断停止开新仓。
 【大盘】${(indices || []).map(i => `${i.name} ${i.price}(${(i.pct*100).toFixed(2)}%)`).join('；') || '数据缺失'}
 【板块】领涨: ${(sectors?.top || []).join('、')}；领跌: ${(sectors?.bottom || []).join('、')}

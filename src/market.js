@@ -321,6 +321,66 @@ export async function getMarketRegime() {
   };
 }
 
+// ---------- 市场情绪周期（短线择时核心：涨停池/炸板率/昨日涨停赚钱效应/隔夜外盘） ----------
+export async function getSentiment() {
+  const today = bjDateCompact();
+  const out = { date: today };
+  try {
+    // 1) 今日涨停池：家数、最高连板、炸板次数
+    const zt = await httpJson(`https://push2ex.eastmoney.com/getTopicZTPool?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt&Pageindex=0&pagesize=320&sort=fbt%3Aasc&date=${today}`);
+    const ztPool = zt?.data?.pool || [];
+    out.ztCount = zt?.data?.tc ?? ztPool.length;
+    out.maxBoard = ztPool.reduce((m, x) => Math.max(m, x.zttj?.days || x.lbc || 1), 0);
+    out.boardLadder = {};   // 连板梯队 {2:家数, 3:家数...}
+    for (const x of ztPool) { const d = x.zttj?.days || x.lbc || 1; if (d >= 2) out.boardLadder[d] = (out.boardLadder[d] || 0) + 1; }
+    out.topBoards = ztPool.filter(x => (x.zttj?.days || 1) >= 3)
+      .sort((a, b) => (b.zttj?.days || 0) - (a.zttj?.days || 0))
+      .slice(0, 5).map(x => `${x.n}${x.zttj?.days || x.lbc}板(${x.hybk || ''})`);
+    out.ztAvgSeal = ztPool.length ? +(ztPool.reduce((a, x) => a + (x.fund || 0), 0) / ztPool.length / 1e8).toFixed(2) : 0; // 平均封单(亿)
+
+    // 2) 炸板池：炸板率 = 炸板/(涨停+炸板)
+    const zb = await httpJson(`https://push2ex.eastmoney.com/getTopicZBPool?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt&Pageindex=0&pagesize=320&sort=fbt%3Aasc&date=${today}`);
+    const zbCount = zb?.data?.tc ?? (zb?.data?.pool || []).length;
+    out.zbCount = zbCount;
+    out.zbRate = (out.ztCount + zbCount) > 0 ? +((zbCount / (out.ztCount + zbCount)) * 100).toFixed(0) : null;
+
+    // 3) 昨日涨停今日表现（打板赚钱效应）
+    const yzt = await httpJson(`https://push2ex.eastmoney.com/getYesterdayZTPool?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt&Pageindex=0&pagesize=320&sort=zs%3Adesc&date=${today}`);
+    const yPool = yzt?.data?.pool || [];
+    if (yPool.length) {
+      const zs = yPool.map(x => x.zdp ?? 0);   // 昨涨停股今日涨跌幅
+      out.yztAvgPct = +(zs.reduce((a, b) => a + b, 0) / zs.length).toFixed(2);
+      out.yztUpRate = +((zs.filter(v => v > 0).length / zs.length) * 100).toFixed(0);
+      out.yztCount = yPool.length;
+    }
+
+    // 4) 隔夜外盘
+    const os = await httpJson(`${EM}/ulist.np/get?fltt=2&secids=100.DJIA,100.NDX,100.SPX,100.HSI&fields=f2,f3,f14`);
+    out.overseas = (os?.data?.diff || []).map(x => `${x.f14}${x.f3 > 0 ? '+' : ''}${x.f3}%`);
+
+    // 5) 情绪周期定性：冰点/修复/发酵/高潮/退潮
+    out.phase = sentimentPhase(out);
+  } catch (e) { out.error = e.message; }
+  return out;
+}
+
+function bjDateCompact() {
+  const d = new Date(Date.now() + 8 * 3600e3);
+  return d.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+// 情绪周期定性（游资情绪周期理论：冰点→修复→发酵→高潮→退潮）
+function sentimentPhase(s) {
+  const { ztCount = 0, maxBoard = 0, zbRate, yztAvgPct } = s;
+  if (zbRate == null && !ztCount) return '数据不足';
+  const zr = zbRate ?? 50;
+  if (ztCount < 30 && maxBoard <= 3 && (yztAvgPct ?? 0) < 0) return '冰点(轻仓试错或空仓，等转折信号)';
+  if ((yztAvgPct ?? 0) < -1 || zr > 45) return '退潮(防守，不接力高位板，谨防补跌)';
+  if (maxBoard >= 6 && ztCount > 60 && zr < 30) return '高潮(可参与但只买最强主线龙头，警惕次日分歧)';
+  if ((yztAvgPct ?? 0) > 1 && ztCount > 40) return '发酵(赚钱效应扩散，积极做多主线)';
+  return '修复(可低吸主线核心股，控制节奏)';
+}
+
 // 交易日历：用上证指数日K判断最近交易日
 export async function lastTradeDate() {
   const ks = await getDailyKline('000001', 3); // 平安银行K线日期即交易日
