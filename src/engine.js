@@ -2,7 +2,10 @@
 import { CFG } from './config.js';
 import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
-import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes } from './market.js';
+import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes, getIntradayTrend } from './market.js';
+
+// 是否尾盘时段(14:00后)：买入即锁隔夜
+function isLateSessionBJ() { return bjHM() >= '14:00'; }
 
 // 实时报价：腾讯源优先(3秒级)，东财延时兜底——止损/成交价判断必须用实时价
 async function bestQuotes(codes) {
@@ -38,6 +41,8 @@ let lastDecisionTs = 0;
 let running = false;
 let stopped = false;           // 实验到期后停止交易
 let deciding = false;          // 决策回合互斥锁：防止tick重叠导致重复下单
+let regimeStable = null;       // 已确认的体制（滞回）
+let regimeStreak = { regime: null, count: 0 };  // 待确认体制的连续计数
 let closing = false;           // 收盘处理互斥锁
 
 function inTradeWindow() {
@@ -96,6 +101,34 @@ function settleLessons(pos, profit) {
     settleOnSell(lstore, pos.lessonIds, profit);
     saveLessons(lstore);
   } catch {}
+}
+
+// regime滞回：指数在MA20附近来回穿越会让体制抖动，抖动=买卖信号打架
+// 规则：转弱(risk_on/neutral→risk_off)立即生效（保本金优先）；转强需连续2次同向确认
+const REGIME_RANK = { risk_off: 0, neutral: 1, risk_on: 2, unknown: 1 };
+function stabilizeRegime(raw) {
+  const cur = regimeStable || raw;
+  if (raw.regime === cur.regime || raw.regime === 'unknown') {
+    regimeStreak = { regime: raw.regime, count: 0 };
+    regimeStable = raw.regime === 'unknown' ? cur : raw;
+    return regimeStable;
+  }
+  const weakening = (REGIME_RANK[raw.regime] ?? 1) < (REGIME_RANK[cur.regime] ?? 1);
+  if (weakening) {                       // 转弱立即生效
+    regimeStable = raw; regimeStreak = { regime: raw.regime, count: 0 };
+    logEvent(state, `体制转弱立即生效: ${cur.regime}→${raw.regime} (${raw.detail})`);
+    return raw;
+  }
+  // 转强：需连续2次确认
+  regimeStreak = regimeStreak.regime === raw.regime
+    ? { regime: raw.regime, count: regimeStreak.count + 1 }
+    : { regime: raw.regime, count: 1 };
+  if (regimeStreak.count >= 2) {
+    logEvent(state, `体制转强确认(连续${regimeStreak.count}次): ${cur.regime}→${raw.regime}`);
+    regimeStable = raw; regimeStreak = { regime: raw.regime, count: 0 };
+    return raw;
+  }
+  return { ...cur, detail: `${cur.detail}｜待确认转强:${raw.regime}(${regimeStreak.count}/2)` };
 }
 
 // 盘中快速风控扫描：实时价 vs 止损线，触发即卖（不等LLM决策轮，30s级响应）
@@ -178,7 +211,8 @@ async function _runDecisionRound(force = false) {
   }
 
   // 2) LLM 决策（带大盘趋势体制+回撤状态）
-  const regime = await getMarketRegime().catch(() => ({ regime: 'unknown', detail: '获取失败' }));
+  const rawRegime = await getMarketRegime().catch(() => ({ regime: 'unknown', detail: '获取失败' }));
+  const regime = stabilizeRegime(rawRegime);
   const maxPos = (CFG.risk.regimeMaxPos || {})[regime.regime] ?? CFG.risk.maxPositions;
   let decision;
   try {
@@ -196,12 +230,30 @@ async function _runDecisionRound(force = false) {
   for (const a of actions) {
     try {
       if (a.type === 'BUY' && a.code) {
+        // 门禁：买入必须评估过隔夜风险（T+1常识程序化），缺字段=没想清楚=拒单
+        const dayTrend = typeof a.dayTrend === 'string' ? a.dayTrend.trim() : '';
+        const holdPlan = typeof a.holdPlan === 'string' ? a.holdPlan.trim() : '';
+        if (!dayTrend || !holdPlan) {
+          logEvent(state, `拒单 ${a.code}：缺${!dayTrend ? 'dayTrend(日内走势判断)' : ''}${!dayTrend && !holdPlan ? '+' : ''}${!holdPlan ? 'holdPlan(明日退出计划)' : ''}，隔夜风险未评估`);
+          logDecision(state, { type: 'REJECTED', code: a.code, name: a.name || '', reason: a.reason || '', missing: [!dayTrend && 'dayTrend', !holdPlan && 'holdPlan'].filter(Boolean).join(',') });
+          continue;
+        }
         if (Object.keys(state.positions).length >= maxPos && !state.positions[a.code]) {
           logEvent(state, `仓位已满(${regime.regime}体制上限${maxPos}只)，忽略买入 ${a.code}`); continue;
         }
         const q = (await bestQuotes([a.code]))[a.code];
         if (!q || q.price <= 0) { logEvent(state, `行情缺失，忽略买入 ${a.code}`); continue; }
         if (limitUp(q)) { logEvent(state, `涨停买不进 ${a.code} ${q.price}`); continue; }
+        // 门禁2：尾盘(14:00后)买前核实个股日内形态，冲高回落/午后走弱=出货形态，禁止锁隔夜
+        if (isLateSessionBJ()) {
+          const trend = await getIntradayTrend(a.code, 5).catch(() => null);
+          const sh = trend?.dayShape;
+          if (sh && /冲高回落|午后走弱|全天走弱/.test(sh.shape)) {
+            logEvent(state, `尾盘拒单 ${a.code}：日内形态「${sh.shape}」，现距高点${sh.pctFromHigh}%，不锁隔夜`);
+            logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '尾盘+日内出货形态: ' + sh.shape });
+            continue;
+          }
+        }
         // 专业仓位：ATR波动率 + 固定风险比例(1.5%/笔)，而非顶格买
         const klines = await getKlines(a.code).catch(() => null);
         const eq = equityOf(state, quotes);
@@ -210,11 +262,15 @@ async function _runDecisionRound(force = false) {
         const usedLessons = Array.isArray(a.usedLessons) ? a.usedLessons.filter(x => typeof x === 'string').slice(0, 5) : [];
         const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason, lessonIds: usedLessons });
         if (r.ok) {
-          // 经验引用记账：citations++（证据链，供收盘审计裁决）
+          // 记录隔夜评估（买入即对明早负责，收盘复盘按此验收）
+          state.positions[a.code].dayTrend = dayTrend;
+          state.positions[a.code].holdPlan = holdPlan;
+          r.trade.dayTrend = dayTrend;
+          r.trade.holdPlan = holdPlan;
           const lstore = loadLessons();
           recordCitation(lstore, usedLessons, bjDate());
           saveLessons(lstore);
-          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '', sizing: sz.reason, stopPrice: sz.stopPrice, posPct: (sz.positionPct*100).toFixed(1)+'%', usedLessons });
+          logDecision(state, { type: 'LLM_BUY', code: a.code, name: r.trade.name, price: r.trade.price, shares: r.trade.shares, amount: r.trade.amount, fee: r.trade.fee, reason: a.reason || '', sizing: sz.reason, stopPrice: sz.stopPrice, posPct: (sz.positionPct*100).toFixed(1)+'%', usedLessons, dayTrend, holdPlan });
         } else logEvent(state, `买入失败 ${a.code}: ${r.err}`);
       } else if (a.type === 'SELL' && a.code && state.positions[a.code]) {
         const p = state.positions[a.code];

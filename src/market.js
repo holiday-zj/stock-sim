@@ -163,23 +163,67 @@ export async function getSectorRank(limit = 5) {
   } catch { return { top: [], bottom: [] }; }
 }
 
-// ---------- 当日分时（1分钟：时间,价,量,均价）——日内节奏/尾盘异动 ----------
+// ---------- 日内形态分析（通用）：判断"当天走势"而非"一时走势" ----------
+function shapeOf(pts, preClose) {
+  if (!pts || pts.length < 20) return null;
+  const first = pts[0], last = pts.at(-1);
+  const hi = Math.max(...pts.map(p => p.p)), lo = Math.min(...pts.map(p => p.p));
+  const hiT = pts.find(p => p.p === hi).t, loT = pts.find(p => p.p === lo).t;
+  const morning = pts.filter(p => p.t <= '11:30');
+  const afternoon = pts.filter(p => p.t >= '13:00');
+  const mornAvg = morning.length ? morning.reduce((a, b) => a + b.p, 0) / morning.length : first.p;
+  const aftAvg = afternoon.length ? afternoon.reduce((a, b) => a + b.p, 0) / afternoon.length : mornAvg;
+  const drift = (aftAvg / mornAvg - 1) * 100;
+  const fromOpen = (last.p / first.p - 1) * 100;
+  const fromHi = (last.p / hi - 1) * 100;
+  const gapPct = preClose ? (first.p / preClose - 1) * 100 : null;
+
+  let shape;
+  if (fromHi < -0.5) shape = `冲高回落(高点${hiT},现距高点${fromHi.toFixed(1)}%)`;      // 出货形态
+  else if (drift < -0.2) shape = `午后走弱(上午均${mornAvg.toFixed(2)}→下午均${aftAvg.toFixed(2)})`;
+  else if (drift > 0.2) shape = '午后走强(资金持续进场)';
+  else if (Math.abs(fromOpen) < 0.2) shape = '横盘震荡(方向未明)';
+  else shape = fromOpen > 0 ? '全天稳步上行' : '全天走弱';
+
+  return {
+    open: +first.p.toFixed(2), now: +last.p.toFixed(2), time: last.t,
+    high: +hi.toFixed(2), highTime: hiT, low: +lo.toFixed(2), lowTime: loT,
+    gapPct: gapPct != null ? +gapPct.toFixed(2) : null,      // 高开/低开幅度
+    pctFromOpen: +fromOpen.toFixed(2), pctFromHigh: +fromHi.toFixed(2),
+    vwap: +last.avg.toFixed(2), aboveVwap: last.p >= last.avg,   // 站上均价线=日内多头
+    posInDayRange: +((last.p - lo) / ((hi - lo) || 1)).toFixed(2), // 0=全天最低 1=全天最高
+    driftPct: +drift.toFixed(2), shape,
+  };
+}
+
+// ---------- 当日分时（1分钟）+ 日内形态 ----------
 export async function getIntradayTrend(code, tailMinutes = 40) {
   try {
     const d = await httpJson(`${EM}/stock/trends2/get?secid=${secid(code)}&fields1=f1,f2,f3,f8&fields2=f51,f53,f56,f58&iscr=0&ndays=1`);
     const tr = d?.data?.trends;
     const preClose = d?.data?.preClose;
     if (!tr || !tr.length) return null;
-    const tail = tr.slice(-tailMinutes).map(line => {
-      const [t, p, v, avg] = line.split(',');
-      return { t: t.slice(11), p: +p, v: +v, avg: +avg };
-    });
-    const last = tr[tr.length - 1].split(',');
+    const pts = tr.map(line => { const [t, p, v, avg] = line.split(','); return { t: t.slice(11), p: +p, v: +v, avg: +avg }; });
+    const tail = pts.slice(-tailMinutes);
+    const last = pts.at(-1);
     return {
       preClose, points: tr.length,
-      lastPrice: +last[1], lastTime: last[0].slice(11),
-      tail,   // 最近N分钟明细，LLM可看日内节奏
+      lastPrice: last.p, lastTime: last.t,
+      tail,
+      dayShape: shapeOf(pts, preClose),   // 全天形态：高开低走/冲高回落/午后走弱等
     };
+  } catch { return null; }
+}
+
+// ---------- 大盘日内走势（判断今天是走强还是走弱的一天，而非此刻涨跌） ----------
+export async function getIndexIntraday(idxSecid = '1.000001') {
+  try {
+    const d = await httpJson(`${EM}/stock/trends2/get?secid=${idxSecid}&fields1=f1,f2,f3,f8&fields2=f51,f53,f56,f58&iscr=0&ndays=1`);
+    const tr = d?.data?.trends;
+    if (!tr || tr.length < 20) return null;
+    const pts = tr.map(line => { const [t, p, v, avg] = line.split(','); return { t: t.slice(11), p: +p, v: +v, avg: +avg }; });
+    const s = shapeOf(pts, d?.data?.preClose);
+    return { ...s, label: '上证指数' };
   } catch { return null; }
 }
 

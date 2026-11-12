@@ -61,6 +61,7 @@ export function doBuy(s, { code, name, price, reason, quoteTime, quotes, shares:
     ts: bjStamp(), side: 'BUY', code, name, price: exec, refPrice: price,
     shares, amount: +cost.toFixed(2), fee, quoteTime, reason,
     stopPrice: stopPrice || null, sizing: sizingNote || null,
+    lessonIds: Array.isArray(lessonIds) ? lessonIds.slice(0, 5) : [],
   };
   s.trades.push(tr);
   return { ok: true, trade: tr };

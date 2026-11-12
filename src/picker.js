@@ -83,7 +83,7 @@ export async function buildCandidates(heldCodes = new Set()) {
         news: news.slice(0, 3),
         ann: ann.slice(0, 3),
         // 增强数据：日内分时节奏 / 概念板块(名称+当日涨幅) / 融资融券 / 业绩预告
-        intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-12) } : null,
+        intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-12), dayShape: trend.dayShape } : null,
         concepts,
         margin: margin ? { rzyeYi: +(margin.rzye / 1e8).toFixed(1), rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2), date: margin.date } : null,
         forecast: forecast.slice(0, 2),
