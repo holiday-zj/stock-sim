@@ -1,7 +1,12 @@
 // 通用工具：HTTP(GBK)、JSON存储、技术指标、费用计算
 import fs from 'node:fs';
 import path from 'node:path';
+import dns from 'node:dns';
 import { CFG, DATA_DIR } from './config.js';
+
+// 关键：强制IPv4优先。东财部分域名(push2his等)有AAAA记录但本机IPv6路由不通，
+// Node fetch 会优先试IPv6并失败（curl靠happy-eyeballs回退所以正常）——这是K线"偶发失败"的根因。
+dns.setDefaultResultOrder('ipv4first');
 
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' };
 

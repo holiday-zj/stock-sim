@@ -70,15 +70,29 @@ export async function getDailyKline(code, days = 60, attempt = 1) {
   try {
     const d = await httpJson(`${EMH}/stock/kline/get?secid=${secid(code)}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=${days}`);
     const ks = d?.data?.klines;
-    if (!ks) throw new Error('no klines');
+    if (!ks || !ks.length) throw new Error('no klines');
     return ks.map(line => {
       const [date, open, close, high, low, vol, amount] = line.split(',');
       return { date, open: +open, close: +close, high: +high, low: +low, vol: +vol, amount: +amount };
     });
   } catch (e) {
-    if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return getDailyKline(code, days, attempt + 1); }
-    return null;
+    if (attempt < 2) { await new Promise(r => setTimeout(r, 500 * attempt)); return getDailyKline(code, days, attempt + 1); }
+    return getDailyKlineTencent(code, days);   // 东财失败→腾讯备用源
   }
+}
+
+// 腾讯日K备用源（前复权）——东财不可用时兜底，保证ATR/技术面不瘫痪
+export async function getDailyKlineTencent(code, days = 60) {
+  try {
+    const d = await httpJson(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tencentSym(code)},day,,,${days},qfq`);
+    const node = d?.data?.[tencentSym(code)];
+    const ks = node?.qfqday || node?.day;
+    if (!ks || !ks.length) return null;
+    return ks.map(a => ({
+      date: a[0], open: +a[1], close: +a[2], high: +a[3], low: +a[4],
+      vol: +(a[5] || 0) * 100, amount: +(a[6] || 0),
+    }));
+  } catch { return null; }
 }
 
 // ---------- 选股池：活跃股排行（东财 clist，可按成交额/换手排序） ----------
