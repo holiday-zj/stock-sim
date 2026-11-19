@@ -2,7 +2,7 @@
 import { CFG } from './config.js';
 import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
-import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes, getIntradayTrend } from './market.js';
+import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes, getIntradayTrend, getIndexIntraday } from './market.js';
 
 // 是否尾盘时段(14:00后)：买入即锁隔夜
 function isLateSessionBJ() { return bjHM() >= '14:00'; }
@@ -244,13 +244,31 @@ async function _runDecisionRound(force = false) {
         const q = (await bestQuotes([a.code]))[a.code];
         if (!q || q.price <= 0) { logEvent(state, `行情缺失，忽略买入 ${a.code}`); continue; }
         if (limitUp(q)) { logEvent(state, `涨停买不进 ${a.code} ${q.price}`); continue; }
-        // 门禁2：尾盘(14:00后)买前核实个股日内形态，冲高回落/午后走弱=出货形态，禁止锁隔夜
-        if (isLateSessionBJ()) {
+        // 门禁1.5：追高硬约束——当日涨幅>6%不买（11-18教训：+8.2%追首板近尾盘高点，隔夜低开-2%）
+        if (q.pct != null && q.pct > CFG.risk.maxBuyDayPct) {
+          logEvent(state, `追高拒单 ${a.code}：当日涨幅${(q.pct*100).toFixed(1)}%>6%上限，不接力高位`);
+          logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: `追高门禁: 当日+${(q.pct*100).toFixed(1)}%>6%` });
+          continue;
+        }
+        // 门禁2：全时段买前核实个股日内形态——出货形态/深度回落禁止买入锁隔夜
+        // （11-12教训：10:36两笔买入当时已是冲高回落形态(-5.4%/-5.7%距高点)，旧门禁只查14:00后，早盘漏网）
+        {
           const trend = await getIntradayTrend(a.code, 5).catch(() => null);
           const sh = trend?.dayShape;
-          if (sh && /冲高回落|午后走弱|全天走弱/.test(sh.shape)) {
-            logEvent(state, `尾盘拒单 ${a.code}：日内形态「${sh.shape}」，现距高点${sh.pctFromHigh}%，不锁隔夜`);
-            logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '尾盘+日内出货形态: ' + sh.shape });
+          if (sh) {
+            const weakShape = /午后走弱|全天走弱|高开低走/.test(sh.shape);
+            const deepPullback = sh.pctFromHigh != null && sh.pctFromHigh <= -1.5;  // 距日内高点回落≥1.5%=派发,浅回踩(-0.5~-1.5%)留给LLM判断
+            if (weakShape || deepPullback) {
+              logEvent(state, `形态拒单 ${a.code}：日内形态「${sh.shape}」，现距高点${sh.pctFromHigh}%，不接出货形态`);
+              logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '日内出货形态: ' + sh.shape + ` 距高点${sh.pctFromHigh}%` });
+              continue;
+            }
+          }
+          // 门禁3：大盘日内走弱时禁止开新仓——指数日内位置<0.4且(上下午偏移<0或较开盘跌>0.3%)，个股隔夜胜率大降
+          const idxSh = await getIndexIntraday('1.000001').catch(() => null);
+          if (idxSh && idxSh.posInDayRange < 0.4 && (idxSh.driftPct < 0 || idxSh.pctFromOpen < -0.3)) {
+            logEvent(state, `大盘日内拒单 ${a.code}：上证日内偏移${idxSh.driftPct}% 较开盘${idxSh.pctFromOpen}% 日内位置${idxSh.posInDayRange}(${idxSh.shape})，不开新仓`);
+            logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '大盘日内走弱: ' + idxSh.shape });
             continue;
           }
         }

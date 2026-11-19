@@ -369,10 +369,13 @@ export async function getMarketRegime() {
   if (aboveMa10) score++;
   if (ma20up) score++;
   if (chg5 > 0) score++;
-  const regime = score >= 3 ? 'risk_on' : (score <= 1 ? 'risk_off' : 'neutral');
+  let regime = score >= 3 ? 'risk_on' : (score <= 1 ? 'risk_off' : 'neutral');
+  // 熊市反弹降级：MA20仍向下时盘中站上均线多为诱多，不认定risk_on（11-12教训：10:17转risk_on买入，13:58翻回risk_off）
+  const capped = regime === 'risk_on' && !ma20up;
+  if (capped) regime = 'neutral';
   const cybNote = cyb ? `创业板${(cyb.at(-1).close / cyb.at(-6).close - 1) > 0 ? '强' : '弱'}` : '';
   return {
-    regime, score,
+    regime, score, cappedFromRiskOn: capped,
     sh: +last.toFixed(0), ma20: +ma20.toFixed(0),
     aboveMa20, aboveMa10, ma20up, chg5: +(chg5 * 100).toFixed(2),
     detail: `上证${last.toFixed(0)} ${aboveMa20 ? '站上' : '跌破'}MA20(${ma20.toFixed(0)}) MA20${ma20up ? '向上' : '走平/向下'} 5日${(chg5*100).toFixed(1)}% ${cybNote} → ${regime}`,

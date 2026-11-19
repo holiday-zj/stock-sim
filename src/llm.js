@@ -8,6 +8,23 @@ export function llmOk() { return !!(cfg.LLM_KEY && cfg.LLM_KEY.length >= 20 && c
 
 export async function llmChat(system, user, { timeout = 120000, temperature = 0.2 } = {}) {
   if (!llmOk()) throw new Error('LLM 未配置');
+  // 网络抖动重试一次（fetch failed 多为瞬时故障，一轮决策失败=20分钟空窗）
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await _llmChatOnce(system, user, { timeout, temperature });
+    } catch (e) {
+      lastErr = e;
+      const transient = /fetch failed|ETIMEDOUT|ECONNRESET|EAI_AGAIN|socket hang up/i.test(e.message || '') || e.cause;
+      if (!transient || attempt === 1) throw e;
+      appendLog('LLM_RETRY', { err: e.message, cause: String(e.cause || '') });
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+  throw lastErr;
+}
+
+async function _llmChatOnce(system, user, { timeout, temperature }) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeout);
   try {

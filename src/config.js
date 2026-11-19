@@ -31,6 +31,7 @@ export const CFG = {
     maxPositions: 3,          // 最多同时持仓数
     maxPosPct: 0.35,          // 单票硬顶 ≤ 总资产35%（防低波动股仓位过大）
     minCashReserve: 0.15,     // 现金底线 ≥ 总资产15%
+    maxBuyDayPct: 0.06,       // 追高硬门禁：当日涨幅>6%禁止买入（程序强制，不靠提示词自觉）
     // —— 离场 ——
     stopLoss: -0.06,          // 兜底固定止损（无ATR数据时用）
     trailTrigger: 0.10,       // 浮盈 ≥10% 启动移动止盈
