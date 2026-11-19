@@ -2,7 +2,8 @@
 import { CFG } from './config.js';
 import { bjNow, bjStamp, bjDate, bjHM } from './env.js';
 import { loadState, persist, doBuy, doSell, equityOf, posValueOf, logDecision, logEvent } from './store.js';
-import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes, getIntradayTrend, getIndexIntraday } from './market.js';
+import { getQuotes, getDailyKline, getMarketRegime, getRealtimeQuotes, getIntradayTrend, getIndexIntraday, getSentiment, getSectorRank, sectorStocks } from './market.js';
+import { buildFocusCandidates } from './picker.js';
 
 // 是否尾盘时段(14:00后)：买入即锁隔夜
 function isLateSessionBJ() { return bjHM() >= '14:00'; }
@@ -83,12 +84,12 @@ function heldTradeDays(buyDate) {
 }
 
 // 执行一次决策回合
-async function runDecisionRound(force = false) {
+async function runDecisionRound(force = false, opts = {}) {
   if (deciding) return;                              // 已有回合在跑，跳过（关键：防并发重复下单）
   if (!force && Date.now() - lastDecisionTs < CFG.loop.decisionMinGapMin * 60e3) return;
   deciding = true;
   try {
-    await _runDecisionRound(force);
+    await _runDecisionRound(force, opts);
   } finally {
     deciding = false;
   }
@@ -177,8 +178,9 @@ function drawdownGuard(quotes) {
   return { mode: 'normal', dd, eq, extraMul: 1 };
 }
 
-async function _runDecisionRound(force = false) {
+async function _runDecisionRound(force = false, opts = {}) {
   lastDecisionTs = Date.now();
+  const mainline = !!opts.mainline;      // 主线试错轮：更高预算系数 + 更高持仓上限
   const codes = Object.keys(state.positions);
   const quotes = codes.length ? await bestQuotes(codes) : {};
   const guard = drawdownGuard(quotes);
@@ -210,14 +212,17 @@ async function _runDecisionRound(force = false) {
     return;
   }
 
-  // 2) LLM 决策（带大盘趋势体制+回撤状态）
+  // 2) LLM 决策（带大盘趋势体制+回撤状态；主线轮用更高持仓上限）
   const rawRegime = await getMarketRegime().catch(() => ({ regime: 'unknown', detail: '获取失败' }));
   const regime = stabilizeRegime(rawRegime);
-  const maxPos = (CFG.risk.regimeMaxPos || {})[regime.regime] ?? CFG.risk.maxPositions;
+  const maxPosTable = mainline ? (CFG.risk.regimeMaxPosMainline || CFG.risk.regimeMaxPos) : CFG.risk.regimeMaxPos;
+  const maxPos = (maxPosTable || {})[regime.regime] ?? CFG.risk.maxPositions;
   let decision;
+  let hotCodes = new Set();   // 本轮主线板块候选（享受主线试错预算）
   try {
-    const res = await decide(state, { quotes: await bestQuotes(Object.keys(state.positions)), nowBJ: bjStamp(), regime, maxPos, guard });
+    const res = await decide(state, { quotes: await bestQuotes(Object.keys(state.positions)), nowBJ: bjStamp(), regime, maxPos, guard, candidates: opts.candidates, mainline, scanNote: opts.scanNote });
     decision = res.decision;
+    hotCodes = new Set((res.candidates || []).filter(c => c.hotSector).map(c => c.code));
     // 刷新行情引用
     Object.assign(quotes, res.quotes);
   } catch (e) {
@@ -264,18 +269,21 @@ async function _runDecisionRound(force = false) {
               continue;
             }
           }
-          // 门禁3：大盘日内走弱时禁止开新仓——指数日内位置<0.4且(上下午偏移<0或较开盘跌>0.3%)，个股隔夜胜率大降
-          const idxSh = await getIndexIntraday('1.000001').catch(() => null);
-          if (idxSh && idxSh.posInDayRange < 0.4 && (idxSh.driftPct < 0 || idxSh.pctFromOpen < -0.3)) {
-            logEvent(state, `大盘日内拒单 ${a.code}：上证日内偏移${idxSh.driftPct}% 较开盘${idxSh.pctFromOpen}% 日内位置${idxSh.posInDayRange}(${idxSh.shape})，不开新仓`);
-            logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '大盘日内走弱: ' + idxSh.shape });
-            continue;
+          // 门禁3：大盘日内走弱时禁止常规开新仓——但主线试错轮豁免（结构市=大盘弱主线强，正是试错通道的用武之地；个股形态门禁仍生效）
+          if (!mainline) {
+            const idxSh = await getIndexIntraday('1.000001').catch(() => null);
+            if (idxSh && idxSh.posInDayRange < 0.4 && (idxSh.driftPct < 0 || idxSh.pctFromOpen < -0.3)) {
+              logEvent(state, `大盘日内拒单 ${a.code}：上证日内偏移${idxSh.driftPct}% 较开盘${idxSh.pctFromOpen}% 日内位置${idxSh.posInDayRange}(${idxSh.shape})，不开新仓`);
+              logDecision(state, { type: 'REJECTED', code: a.code, name: q.name, reason: '大盘日内走弱: ' + idxSh.shape });
+              continue;
+            }
           }
         }
-        // 专业仓位：ATR波动率 + 固定风险比例(1.5%/笔)，而非顶格买
+        // 专业仓位：ATR波动率 + 固定风险比例(1.5%/笔)；主线板块标的享受试错通道（更高预算+保底1手）
         const klines = await getKlines(a.code).catch(() => null);
         const eq = equityOf(state, quotes);
-        const sz = calcShares({ equity: eq, cash: state.cash, price: q.price, klines, regime: regime.regime, extraMul: guard.extraMul });
+        const isMainline = mainline || hotCodes.has(a.code);
+        const sz = calcShares({ equity: eq, cash: state.cash, price: q.price, klines, regime: regime.regime, extraMul: guard.extraMul, mainline: isMainline });
         if (sz.shares < 100) { logEvent(state, `仓位不足1手跳过 ${a.code}: ${sz.reason}`); continue; }
         const usedLessons = Array.isArray(a.usedLessons) ? a.usedLessons.filter(x => typeof x === 'string').slice(0, 5) : [];
         const r = doBuy(state, { code: a.code, name: q.name || a.name, price: q.price, reason: a.reason || decision?.summary || '', quoteTime: q.time, quotes, shares: sz.shares, stopPrice: sz.stopPrice, sizingNote: sz.reason, lessonIds: usedLessons });
@@ -403,6 +411,80 @@ function experimentOver() {
   return bjDate() > CFG.runEnd;
 }
 
+// ============ 主线异动快速扫描（进攻端灵敏度核心）============
+// 20分钟一轮的LLM决策太慢，主线发酵往往在几分钟内完成。此扫描每3分钟检查领涨板块，
+// 发现板块内多只未封板强势股=主线发酵，立即发起一次"主线试错"决策轮（候选股即异动标的）。
+// 只在情绪修复/发酵期、非尾盘、非熔断模式下触发，每天限次。
+let scanning = false;
+let lastScanTs = 0;
+let fastRoundsToday = { date: null, count: 0, lastTs: 0 };
+
+async function mainlineScan() {
+  const S = CFG.risk.scan || {};
+  if (!S.enabled) return;
+  if (scanning || deciding || closing) return;
+  if (!inTradeWindow() || !inDecisionWindow()) return;
+  if (bjHM() >= '14:15') return;                       // 尾盘不发起新扫描（锁隔夜风险）
+  const today = bjDate();
+  if (fastRoundsToday.date !== today) fastRoundsToday = { date: today, count: 0, lastTs: 0 };
+  if (fastRoundsToday.count >= (S.maxFastRoundsPerDay || 3)) return;
+  if (Date.now() - lastScanTs < (S.everySec || 180) * 1000) return;
+  if (Date.now() - fastRoundsToday.lastTs < (S.minGapMin || 40) * 60e3) return;
+  scanning = true;
+  lastScanTs = Date.now();
+  try {
+    // 熔断/防守模式不主动进攻
+    const eq = equityOf(state, {});
+    const dd = eq / (state.peakEquity || CFG.startCash) - 1;
+    if (dd <= (CFG.risk.ddHalt || -0.08)) return;
+
+    // 情绪过滤：只在修复/发酵期扫；炸板率过高说明接力资金亏钱
+    const senti = await getSentiment().catch(() => null);
+    if (!senti) return;
+    const phase = String(senti.phase || '');
+    const phases = S.phases || ['修复', '发酵'];
+    if (!phases.some(p => phase.includes(p))) return;
+    if (senti.zbRate != null && senti.zbRate > (S.maxZbRate || 45)) return;
+
+    // 定位主线：领涨板块中涨幅达标者，逐个查成分股里未封板的强势股
+    const sectors = await getSectorRank(4).catch(() => ({ top: [] }));
+    const heldCodes = new Set(Object.keys(state.positions));
+    const hits = [];
+    for (const sec of (sectors.top || []).slice(0, 3)) {
+      if (!sec || sec.pct < (S.minSectorPct || 1.5)) continue;
+      const stocks = await sectorStocks(sec.code, 20).catch(() => []);
+      const strong = stocks.filter(x =>
+        x.pct >= (S.stockPctMin ?? 0.01) && x.pct <= (S.stockPctMax ?? 0.06) &&
+        (x.mainNet == null || x.mainNet > 0) &&
+        !/^68|^8|^4|^92/.test(x.code) && !/ST|退/.test(x.name));
+      if (strong.length >= (S.minCandidates || 2)) {
+        hits.push({ sector: sec, stocks: strong.slice(0, 4) });
+      }
+      if (hits.length >= 2) break;
+    }
+    if (!hits.length) return;
+
+    // 主线发酵确认 → 深度增强这些标的，发起主线试错决策轮
+    const codes = [...new Set(hits.flatMap(h => h.stocks.map(x => x.code)))];
+    const candidates = await buildFocusCandidates(codes, heldCodes).catch(() => []);
+    if (!candidates.length) return;
+    // 标注主线来源（供提示词识别 + 引擎判定试错预算）
+    const secOf = {};
+    for (const h of hits) for (const x of h.stocks) secOf[x.code] = { name: h.sector.name, pct: h.sector.pct };
+    for (const c of candidates) {
+      const m = secOf[c.code];
+      if (m) { c.hotSector = m.name; c.hotSectorPct = m.pct; }
+    }
+    const note = hits.map(h => `${h.sector.name}+${h.sector.pct}%(${h.stocks.length}只强势未封板: ${h.stocks.map(x => `${x.name}+${(x.pct*100).toFixed(1)}%`).join('/')})`).join('；');
+    logEvent(state, `⚡主线异动: ${note} → 发起主线试错轮(情绪${phase})`);
+    fastRoundsToday.count++;
+    fastRoundsToday.lastTs = Date.now();
+    await runDecisionRound(true, { mainline: true, candidates, scanNote: `${note}。情绪${phase}。这些是主线板块内正在发酵但未封板的标的，重点评估买点质量而非大盘脸色。` });
+  } catch (e) {
+    appendLog('SCAN_ERR', { err: e.message });
+  } finally { scanning = false; }
+}
+
 let closedToday = false;
 async function tick() {
   try {
@@ -431,6 +513,8 @@ async function tick() {
       // 盘中独立风控轮询：不依赖LLM决策间隔，用实时价盯止损线（30s级响应跳水）
       if (inTradeWindow() && Object.keys(state.positions).length) await riskSweep();
       if (inDecisionWindow()) await runDecisionRound();
+      // 主线异动快速扫描：发现主线发酵立即发起试错决策轮（进攻端灵敏度）
+      await mainlineScan();
       // 收盘后记净值（15:00~23:59 之间第一次tick）
       if (bjHM() >= '15:05' && !closedToday) { closedToday = true; await closeOfDay(); }
     } else {

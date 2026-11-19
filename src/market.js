@@ -102,13 +102,14 @@ export async function rankActive({ by = 'f8', limit = 60 } = {}) {
   const out = [];
   for (let pn = 1; pn <= Math.ceil(limit / 100); pn++) {
     try {
-      const d = await httpJson(`${EM}/clist/get?pn=${pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=${by}&fs=${fs}&fields=f2,f3,f6,f8,f9,f12,f14,f20,f21,f23,f100`);
+      const d = await httpJson(`${EM}/clist/get?pn=${pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=${by}&fs=${fs}&fields=f2,f3,f6,f8,f9,f12,f14,f20,f21,f23,f62,f100`);
       for (const x of d?.data?.diff || []) {
         if (!x.f12 || typeof x.f2 !== 'number') continue;
         out.push({
           code: x.f12, name: x.f14, price: x.f2, pct: x.f3 / 100,
           amount: x.f6, turnover: x.f8 / 100, pe: x.f9,   // 全小数约定
           mcap: x.f20, floatMcap: x.f21, pb: x.f23, industry: x.f100,
+          mainNet: typeof x.f62 === 'number' ? x.f62 : null,  // 主力净流入(元)
         });
       }
     } catch { break; }
@@ -172,9 +173,22 @@ export async function getSectorRank(limit = 5) {
   try {
     const d = await httpJson(`${EM}/clist/get?pn=1&pz=${limit * 2}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f3,f12,f14`);
     const arr = (d?.data?.diff || []).filter(x => typeof x.f3 === 'number');
-    return { top: arr.slice(0, limit).map(x => `${x.f14}${x.f3.toFixed(1)}%`),
-             bottom: arr.slice(-limit).reverse().map(x => `${x.f14}${x.f3.toFixed(1)}%`) };
+    return { top: arr.slice(0, limit).map(x => ({ name: x.f14, code: x.f12, pct: +x.f3.toFixed(2) })),
+             bottom: arr.slice(-limit).reverse().map(x => ({ name: x.f14, code: x.f12, pct: +x.f3.toFixed(2) })) };
   } catch { return { top: [], bottom: [] }; }
+}
+
+// ---------- 板块成分股（按涨幅排序）：结构市进攻的核心——先定位主线板块，再从板块内找标的 ----------
+export async function sectorStocks(bkCode, limit = 20) {
+  try {
+    const d = await httpJson(`${EM}/clist/get?pn=1&pz=${limit}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:${bkCode}+f:!50&fields=f2,f3,f6,f8,f9,f12,f14,f20,f21,f23,f62,f100`);
+    return (d?.data?.diff || []).filter(x => x.f12 && typeof x.f2 === 'number').map(x => ({
+      code: x.f12, name: x.f14, price: x.f2, pct: x.f3 / 100,
+      amount: x.f6, turnover: x.f8 / 100, pe: x.f9,
+      mcap: x.f20, floatMcap: x.f21, pb: x.f23, industry: x.f100,
+      mainNet: typeof x.f62 === 'number' ? x.f62 : null,
+    }));
+  } catch { return []; }
 }
 
 // ---------- 日内形态分析（通用）：判断"当天走势"而非"一时走势" ----------
@@ -398,6 +412,9 @@ export async function getSentiment() {
       .sort((a, b) => (b.zttj?.days || 0) - (a.zttj?.days || 0))
       .slice(0, 5).map(x => `${x.n}${x.zttj?.days || x.lbc}板(${x.hybk || ''})`);
     out.ztAvgSeal = ztPool.length ? +(ztPool.reduce((a, x) => a + (x.fund || 0), 0) / ztPool.length / 1e8).toFixed(2) : 0; // 平均封单(亿)
+    // 1.5) 涨停板块分布：哪个行业在批量涨停=当日主线（结构市定位核心数据）
+    out.ztBySector = {};
+    for (const x of ztPool) { if (x.hybk) out.ztBySector[x.hybk] = (out.ztBySector[x.hybk] || 0) + 1; }
 
     // 2) 炸板池：炸板率 = 炸板/(涨停+炸板)
     const zb = await httpJson(`https://push2ex.eastmoney.com/getTopicZBPool?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt&Pageindex=0&pagesize=320&sort=fbt%3Aasc&date=${today}`);
@@ -415,12 +432,14 @@ export async function getSentiment() {
       out.yztCount = yPool.length;
     }
 
-    // 4) 隔夜外盘
-    const os = await httpJson(`${EM}/ulist.np/get?fltt=2&secids=100.DJIA,100.NDX,100.SPX,100.HSI&fields=f2,f3,f14`);
-    out.overseas = (os?.data?.diff || []).map(x => `${x.f14}${x.f3 > 0 ? '+' : ''}${x.f3}%`);
-
-    // 5) 情绪周期定性：冰点/修复/发酵/高潮/退潮
+    // 4) 情绪周期定性：冰点/修复/发酵/高潮/退潮（提前计算，不受外盘接口失败影响）
     out.phase = sentimentPhase(out);
+
+    // 5) 隔夜外盘（独立try/catch：外盘接口失败不应影响A股情绪定性）
+    try {
+      const os = await httpJson(`${EM}/ulist.np/get?fltt=2&secids=100.DJIA,100.NDX,100.SPX,100.HSI&fields=f2,f3,f14`);
+      out.overseas = (os?.data?.diff || []).map(x => `${x.f14}${x.f3 > 0 ? '+' : ''}${x.f3}%`);
+    } catch {}
   } catch (e) { out.error = e.message; }
   return out;
 }

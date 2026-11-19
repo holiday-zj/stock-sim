@@ -20,11 +20,15 @@ export function atrPct(klines, n = CFG.risk.atrPeriod) {
 }
 
 // 计算买入股数 + 该股专属止损距离/止损价（regime联动：大盘弱→预算自动缩）
-export function calcShares({ equity, cash, price, klines, regime = 'neutral', extraMul = 1 }) {
+// mainline=true：主线板块试错单（结构市进攻通道）——用更高的顺势系数，且保证最小1手
+export function calcShares({ equity, cash, price, klines, regime = 'neutral', extraMul = 1, mainline = false }) {
   const R = CFG.risk;
   if (!(price > 0) || !(equity > 0)) return { shares: 0, reason: 'invalid price/equity' };
 
-  const mul = ((R.regimeRiskMul || {})[regime] ?? 1) * extraMul;
+  const regimeMul = mainline
+    ? ((R.regimeRiskMulMainline || {})[regime] ?? ((R.regimeRiskMul || {})[regime] ?? 1))
+    : ((R.regimeRiskMul || {})[regime] ?? 1);
+  const mul = regimeMul * extraMul;
   const riskBudget = equity * R.riskPerTrade * mul;    // 单笔风险预算(元)×顺势系数×防守系数
   const atr = atrPct(klines);
 
@@ -40,17 +44,25 @@ export function calcShares({ equity, cash, price, klines, regime = 'neutral', ex
   const reserve = equity * R.minCashReserve;
   const capByPos = Math.floor(Math.min(cash - reserve, equity * R.maxPosPct) / price / 100) * 100;
 
-  const shares = Math.max(0, Math.min(sharesByRisk, capByPos));
+  let shares = Math.max(0, Math.min(sharesByRisk, capByPos));
+
+  // 主线试错最小1手保障：弱市里也要能上车（100股本身就是最小风险单位，且仍受单票上限/现金底线约束）
+  let probe = false;
+  if (shares < 100 && mainline && capByPos >= 100 && (R.mainlineProbeMaxPosPct == null || price * 100 / equity <= R.mainlineProbeMaxPosPct)) {
+    shares = 100; probe = true;
+  }
+
   const stopPrice = +(price * (1 - stopDist)).toFixed(3);
+  const tag = mainline ? '主线试错' : '2%法则';
 
   return {
     shares, stopDist: +stopDist.toFixed(4), stopPrice, atr: atr != null ? +atr.toFixed(4) : null,
     riskBudget: +riskBudget.toFixed(0), lossPerShare: +lossPerShare.toFixed(3),
-    sharesByRisk, capByPos, cappedByPos: capByPos < sharesByRisk,
+    sharesByRisk, capByPos, cappedByPos: capByPos < sharesByRisk, mainline, probe,
     positionPct: +(shares * price / equity).toFixed(4),
     reason: shares < 100
       ? (capByPos < 100 ? '现金低于底线或单票空间不足1手' : '风险预算不足1手')
-      : `2%法则×${regime}(${mul}): 预算${riskBudget.toFixed(0)}元÷每股止损${lossPerShare.toFixed(2)}=${sharesByRisk}股${atr?`(ATR${(atr*100).toFixed(1)}%→止损距离${(stopDist*100).toFixed(1)}%)`:'(无ATR,用固定止损)'}${capByPos<sharesByRisk?`，受单票上限压到${capByPos}股`:''}`,
+      : `${tag}${regimeMul !== ((R.regimeRiskMul || {})[regime] ?? 1) ? `[${regime}→${regimeMul}]` : `×${regime}(${mul})`}: 预算${riskBudget.toFixed(0)}元÷每股止损${lossPerShare.toFixed(2)}=${sharesByRisk}股${atr?`(ATR${(atr*100).toFixed(1)}%→止损距离${(stopDist*100).toFixed(1)}%)`:'(无ATR,用固定止损)'}${probe?'，主线试错保底1手':(capByPos<sharesByRisk?`，受单票上限压到${capByPos}股`:'')}`,
   };
 }
 

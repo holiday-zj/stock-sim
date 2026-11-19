@@ -18,6 +18,21 @@ export const CFG = {
     riskPerTrade: 0.015,      // 单笔风险预算 = 总资产1.5%（本金是命根子，保守取值）
     regimeRiskMul: { risk_on: 1.0, neutral: 0.6, risk_off: 0.3 },  // 顺势调仓：大盘弱→预算大砍
     regimeMaxPos: { risk_on: 3, neutral: 2, risk_off: 1 },          // 弱势时持仓数也收缩
+    // —— 主线试错通道（结构市进攻：大盘弱但主线板块强时，用更积极的预算上车）——
+    regimeRiskMulMainline: { risk_on: 1.0, neutral: 0.8, risk_off: 0.6 }, // 主线单预算系数（弱市也敢试错，单笔最坏亏损≈0.9%）
+    regimeMaxPosMainline: { risk_on: 3, neutral: 2, risk_off: 2 },        // 主线试错时持仓上限（risk_off也给2个位子）
+    mainlineProbeMaxPosPct: 0.10,  // 保底1手时单票不得超过总资产10%（防高价股一手就重仓）
+    scan: {
+      enabled: true,
+      everySec: 180,          // 主线异动扫描间隔（3分钟，比20分钟决策轮灵敏得多）
+      minSectorPct: 1.5,      // 板块涨幅门槛：主线认定
+      minCandidates: 2,       // 板块内符合条件的强势股≥2只才算主线发酵
+      stockPctMin: 0.01, stockPctMax: 0.06,  // 标的当日涨幅区间：在涨但未追高
+      maxFastRoundsPerDay: 3, // 每天最多触发几次快速决策（防token浪费+防抖动）
+      minGapMin: 40,          // 两次快速决策最小间隔
+      phases: ['修复', '发酵'], // 只在情绪修复/发酵期扫（冰点/退潮/高潮不扫）
+      maxZbRate: 45,          // 炸板率>45%说明接力资金亏钱，不扫
+    },
     // —— 账户级回撤熔断（保本金的最后防线）——
     ddDefensive: -0.05,       // 净值自高点回撤≥5% → 防守模式：风险预算再减半
     ddHalt: -0.08,            // 回撤≥8% → 熔断：停止一切新买入，只管存量止损

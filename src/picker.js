@@ -1,9 +1,9 @@
-// 候选池构建：真实活跃股排行 → 过滤 → 附加K线技术面/新闻/公告/财务
+// 候选池构建：活跃股排行 + 主线板块通道 → 过滤 → 附加K线技术面/新闻/公告/财务
 import { CFG } from './config.js';
-import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast, getBillboard, getBillboardSeats, getFundFlow, getOrderBook } from './market.js';
+import { rankActive, getQuotes, getDailyKline, getNews, getAnnouncements, getFundamentals, getIntradayTrend, getConcepts, getMargin, getProfitForecast, getBillboard, getBillboardSeats, getFundFlow, getOrderBook, getSectorRank, sectorStocks } from './market.js';
 import { sma, rsi, macd } from './util.js';
 
-function passFilter(x, heldCodes) {
+export function passFilter(x, heldCodes) {
   const P = CFG.picker;
   if (!x.code || !x.name) return false;
   if (heldCodes.has(x.code)) return false;               // 已持仓的不进候选
@@ -43,67 +43,123 @@ function technicals(klines) {
   };
 }
 
+// 主线板块通道：当日涨幅前2的行业板块内正在上涨但未封板的股票（结构市进攻的标的来源）
+export async function hotSectorStocks(heldCodes) {
+  const hot = [];
+  try {
+    const sectors = await getSectorRank(2);
+    for (const sec of sectors.top || []) {
+      if (sec.pct < 1) continue;                          // 板块涨幅<1%不算主线
+      const stocks = await sectorStocks(sec.code, 15);
+      for (const x of stocks) {
+        // 在涨(≥1%)、未封板(主板<9.5%/创业板<19.5%)、通过基础过滤
+        const lim = /^30/.test(x.code) ? 0.195 : 0.095;
+        if (x.pct < 0.01 || x.pct > lim) continue;
+        if (!passFilter(x, heldCodes)) continue;
+        x.hotSector = sec.name; x.hotSectorPct = sec.pct;
+        hot.push(x);
+      }
+      if (hot.length >= 8) break;
+    }
+  } catch {}
+  return hot;
+}
+
+// 单只股票深度增强（K线/新闻/公告/财务/分时/板块/两融/预告/龙虎榜）
+async function enrichOne(x, quotes) {
+  const q = quotes[x.code];
+  if (!q || q.price <= 0) return null;
+  try {
+    const [kl, news, ann, fund, trend, concepts, margin, forecast, billboard] = await Promise.all([
+      getDailyKline(x.code, 60), getNews(x.name, x.code, 3),
+      getAnnouncements(x.code, 3), getFundamentals(x.code),
+      getIntradayTrend(x.code, 25), getConcepts(x.code, 6),
+      getMargin(x.code), getProfitForecast(x.code),
+      getBillboard(x.code, { days: 30, limit: 3 }),
+    ]);
+    const tech = technicals(kl);
+    if (!tech) return null;
+    const c = {
+      code: x.code, name: x.name, industry: x.industry || '',
+      price: q.price, pct: q.pct,
+      turnover: q.turnover,
+      amountYi: +(q.amount / 1e8).toFixed(1),
+      floatMcapYi: +(q.floatMcap / 1e8).toFixed(0),
+      pe: q.pe ? +q.pe.toFixed(1) : null,
+      tech, fund,
+      news: news.slice(0, 3),
+      ann: ann.slice(0, 3),
+      intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-12), dayShape: trend.dayShape } : null,
+      concepts,
+      margin: margin ? { rzyeYi: +(margin.rzye / 1e8).toFixed(1), rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2), date: margin.date } : null,
+      forecast: forecast.slice(0, 2),
+      billboard,
+    };
+    if (x.hotSector) { c.hotSector = x.hotSector; c.hotSectorPct = x.hotSectorPct; }
+    if (billboard.length) {
+      const seats = await getBillboardSeats(x.code, { date: billboard[0].date, limit: 8 }).catch(() => []);
+      c.billboardSeats = seats;
+    }
+    const [ff, ob] = await Promise.all([
+      getFundFlow(x.code, 30).catch(() => null),
+      getOrderBook(x.code).catch(() => null),
+    ]);
+    c.fundFlow = ff;
+    c.orderBook = ob ? { bid1: ob.bid1, ask1: ob.ask1, spread: ob.spread, weiBi: ob.weiBi, note: ob.note } : null;
+    return c;
+  } catch { return null; }
+}
+
 export async function buildCandidates(heldCodes = new Set()) {
-  // 1. 按换手率取活跃股，再按成交额取一批，混合去重
-  const byTurnover = await rankActive({ by: 'f8', limit: 80 });
-  const byAmount = await rankActive({ by: 'f6', limit: 60 });
+  // 1. 三条通道混合：换手率活跃 + 成交额活跃 + 主线板块(结构市进攻核心)
+  const [byTurnover, byAmount, hot] = await Promise.all([
+    rankActive({ by: 'f8', limit: 80 }),
+    rankActive({ by: 'f6', limit: 60 }),
+    hotSectorStocks(heldCodes),
+  ]);
   const pool = new Map();
   for (const x of [...byTurnover, ...byAmount]) if (passFilter(x, heldCodes)) pool.set(x.code, x);
-  // 排序：换手率适中偏高 + 成交额大者优先，取前N*2做深度分析
-  const arr = [...pool.values()].sort((a, b) => (b.amount || 0) - (a.amount || 0));
-  const shortlist = arr.slice(0, CFG.picker.topN * 2);
+  // 主线板块股合并进池（保留hotSector标记，已存在则补标记）
+  for (const x of hot) {
+    const ex = pool.get(x.code);
+    if (ex) { ex.hotSector = x.hotSector; ex.hotSectorPct = x.hotSectorPct; }
+    else pool.set(x.code, x);
+  }
+  // 排序：主线板块股优先（涨幅大的板块在前），其余按成交额
+  const arr = [...pool.values()].sort((a, b) => {
+    const ah = a.hotSector ? (a.hotSectorPct || 0) : -1, bh = b.hotSector ? (b.hotSectorPct || 0) : -1;
+    if (ah !== bh) return bh - ah;
+    return (b.amount || 0) - (a.amount || 0);
+  });
+  // 深度分析名额：主线股保底一半，其余给成交额活跃股
+  const hotN = Math.min(Math.ceil(CFG.picker.topN / 2), arr.filter(x => x.hotSector).length);
+  const shortlist = [...arr.filter(x => x.hotSector).slice(0, hotN), ...arr.filter(x => !x.hotSector)];
 
   // 2. 实时快照刷新价格
-  const quotes = await getQuotes(shortlist.map(x => x.code));
+  const quotes = await getQuotes(shortlist.slice(0, CFG.picker.topN * 2).map(x => x.code));
 
   // 3. 深度信息（K线技术面+新闻+公告+财务），并发但限流
   const out = [];
   for (const x of shortlist) {
     if (out.length >= CFG.picker.topN) break;
-    const q = quotes[x.code];
-    if (!q || q.price <= 0) continue;
-    try {
-      const [kl, news, ann, fund, trend, concepts, margin, forecast, billboard] = await Promise.all([
-        getDailyKline(x.code, 60), getNews(x.name, x.code, 3),
-        getAnnouncements(x.code, 3), getFundamentals(x.code),
-        getIntradayTrend(x.code, 25), getConcepts(x.code, 6),
-        getMargin(x.code), getProfitForecast(x.code),
-        getBillboard(x.code, { days: 30, limit: 3 }),
-      ]);
-      const tech = technicals(kl);
-      if (!tech) continue;
-      out.push({
-        code: x.code, name: x.name, industry: x.industry || '',
-        price: q.price, pct: q.pct,
-        turnover: q.turnover,
-        amountYi: +(q.amount / 1e8).toFixed(1),
-        floatMcapYi: +(q.floatMcap / 1e8).toFixed(0),
-        pe: q.pe ? +q.pe.toFixed(1) : null,
-        tech, fund,
-        news: news.slice(0, 3),
-        ann: ann.slice(0, 3),
-        // 增强数据：日内分时节奏 / 概念板块(名称+当日涨幅) / 融资融券 / 业绩预告
-        intraday: trend ? { lastPrice: trend.lastPrice, lastTime: trend.lastTime, preClose: trend.preClose, tail: trend.tail.slice(-12), dayShape: trend.dayShape } : null,
-        concepts,
-        margin: margin ? { rzyeYi: +(margin.rzye / 1e8).toFixed(1), rzjmeWan: +(margin.rzjme / 1e4).toFixed(0), rzyezb: +(margin.rzyezb || 0).toFixed(2), date: margin.date } : null,
-        forecast: forecast.slice(0, 2),
-        billboard,   // 近30天龙虎榜上榜记录
-      });
-      // 若近期上过榜，追加最新一次上榜的席位明细（游资身份）
-      if (billboard.length) {
-        const seats = await getBillboardSeats(x.code, { date: billboard[0].date, limit: 8 }).catch(() => []);
-        out[out.length - 1].billboardSeats = seats;
-      }
-    } catch {}
+    const c = await enrichOne(x, quotes);
+    if (c) out.push(c);
   }
-  // 资金流+五档盘口：只对最终入选的候选拉取（控制请求量）
-  await Promise.all(out.map(async (c) => {
-    const [ff, ob] = await Promise.all([
-      getFundFlow(c.code, 30).catch(() => null),
-      getOrderBook(c.code).catch(() => null),
-    ]);
-    c.fundFlow = ff;
-    c.orderBook = ob ? { bid1: ob.bid1, ask1: ob.ask1, spread: ob.spread, weiBi: ob.weiBi, note: ob.note } : null;
-  }));
+  return out;
+}
+
+// 定点决策候选：只深度增强指定code（快速扫描触发时用，省请求省时间）
+export async function buildFocusCandidates(codes, heldCodes = new Set()) {
+  const list = codes.filter(c => !heldCodes.has(c));
+  if (!list.length) return [];
+  const quotes = await getQuotes(list);
+  const out = [];
+  for (const code of list) {
+    const q = quotes[code];
+    if (!q || q.price <= 0) continue;
+    if (!passFilter({ code, name: q.name, price: q.price, turnover: q.turnover, floatMcap: q.floatMcap, pe: q.pe }, heldCodes)) continue;
+    const c = await enrichOne({ code, name: q.name, industry: q.industry }, quotes);
+    if (c) out.push(c);
+  }
   return out;
 }

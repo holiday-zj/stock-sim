@@ -41,6 +41,12 @@ const SYS = `你是一名顶尖A股短线交易大师，融合利弗莫尔的趋
 3. **时段纪律**：14:00后开新仓要格外谨慎——买入即锁定隔夜，若日内形态已转弱或情绪退潮(炸板率>40%/昨涨停今均<0)，直接放弃。宁可次日开盘看明确了再买，也不赌隔夜。
 4. **必须想清楚明日退出计划(holdPlan)**：这笔买入明天在什么条件下卖？答不出来就说明没想清楚，不要买。计划要具体到价位或形态（如"明日不破MA5持有，放量破MA5即走"、"高开>3%冲高滞涨则止盈"）。
 
+【结构性进攻——大盘弱≠没机会，alpha在主线题材】
+指数弱的结构市是A股常态：每天都有板块在批量涨停。risk_off不是躺平，而是切换成"主线试错"模式：
+1. 定位主线：领涨板块 + 涨停板块分布(ztBySector，同一板块多家涨停=当日主战场) + 题材梯队。
+2. 选标的：主线板块内**未封板的强势股**（涨幅2~6%、主力净流入为正、日内形态健康站稳均价线）——不追已封死的板，不接冲高回落的跟风。候选股带hotSector字段的即来自主线板块通道。
+3. 试错条件（同时满足才出手）：情绪phase=修复或发酵（冰点/退潮不出手）、所属板块当日涨幅>1%、个股日内形态非派发。满足则risk_off下也买——系统会自动给主线试错单上浮风险预算，你只管判断买点质量。
+4. 空仓等待≠不看盘：每轮都要检查主线是否在发酵。系统快速扫描发现主线异动会主动发起决策轮（候选股即异动标的），此时重点核实"买点是否健康"，而非拿大盘脸色一票否决。
 输出严格JSON：
 {"actions":[{"type":"BUY","code":"600000","name":"浦发银行","reason":"50字内","dayTrend":"日内形态判断30字内","holdPlan":"明日退出计划40字内","usedLessons":["L20261110-1"]},{"type":"SELL","code":"...","name":"...","reason":"...","usedLessons":[]},{"type":"HOLD","code":"...","name":"...","reason":"..."}],"summary":"100字内总体思路"}
 usedLessons：本次动作实际应用到的历史经验id数组（从【历史经验教训】的id里选，只填真正影响了本决策的，没有则空数组）。系统会按交易结果给这些经验记战绩，虚报引用会污染经验库评估。
@@ -120,7 +126,7 @@ export async function decide(s, opts = {}) {
   const quotes = opts.quotes || await getQuotes([...heldCodes]);
   const [indices, sectors, candidates, heldSnap, heldExtra, sentiment, leaders, idxIntraday] = await Promise.all([
     getIndices(), getSectorRank(4),
-    opts.skipCandidates ? Promise.resolve([]) : buildCandidates(heldCodes),
+    opts.candidates != null ? Promise.resolve(opts.candidates) : (opts.skipCandidates ? Promise.resolve([]) : buildCandidates(heldCodes)),
     Promise.resolve(heldSnapshot(s, quotes)),
     enrichHeld(s, quotes),
     getSentiment().catch(() => null),
@@ -128,15 +134,15 @@ export async function decide(s, opts = {}) {
     getIndexIntraday('1.000001').catch(() => null),
   ]);
 
-  const user = `【账户】现金 ${s.cash.toFixed(0)}元；持仓市值约 ${(heldSnap.reduce((a, h) => a + h.price * h.shares, 0)).toFixed(0)}元。当前时间 ${opts.nowBJ}。持仓上限${maxPos}只(随大盘体制调整)。
-【大盘趋势体制】${regime.regime}（${regime.detail}）——risk_on可积极进攻，neutral只做精选强势股，risk_off应防守/减仓/空仓等待，逆势重仓是短线最大亏损来源。
+  const user = `${opts.scanNote ? `【⚡主线异动扫描】${opts.scanNote}\n` : ''}【账户】现金 ${s.cash.toFixed(0)}元；持仓市值约 ${(heldSnap.reduce((a, h) => a + h.price * h.shares, 0)).toFixed(0)}元。当前时间 ${opts.nowBJ}。持仓上限${maxPos}只(随大盘体制调整)${opts.mainline ? '。本轮为主线试错轮：候选股多来自当日领涨板块，若买点健康可积极出手，系统已按主线通道上浮风险预算' : ''}。
+【大盘趋势体制】${regime.regime}（${regime.detail}）——risk_on可积极进攻，neutral只做精选强势股，risk_off收缩常规开仓但**主线板块试错通道仍开放**（见下方结构性进攻条款）。逆势重仓是短线最大亏损来源，但空仓错过主线发酵同样是一种亏损。
 【市场情绪周期】${sentiment ? `${sentiment.phase}｜涨停${sentiment.ztCount}家 最高${sentiment.maxBoard}板 炸板率${sentiment.zbRate}% 昨涨停今均${sentiment.yztAvgPct}%(红盘率${sentiment.yztUpRate}%) 平均封单${sentiment.ztAvgSeal}亿 隔夜外盘:${(sentiment.overseas||[]).join(' ')}${sentiment.topBoards?.length ? ' 高位梯队:' + sentiment.topBoards.join('、') : ''}` : '缺失'}
 情绪周期用法：冰点→轻仓/空仓等转折；修复→低吸主线核心；发酵→积极做多(当前赚钱效应扩散期)；高潮→只做最强龙头且警惕次日分歧；退潮→坚决防守不接力。情绪与大盘体制共振时信号最强，背离时以防守为准。
 【大盘日内走势(判断今天是走强还是走弱的一天)】${idxIntraday ? `开${idxIntraday.open} 现${idxIntraday.now}(${idxIntraday.time}) 高${idxIntraday.high}@${idxIntraday.highTime} 低${idxIntraday.low}@${idxIntraday.lowTime} 上下午偏移${idxIntraday.driftPct}% 日内位置${idxIntraday.posInDayRange} → ${idxIntraday.shape}` : '缺失'}
 【当前时段】${opts.nowBJ?.slice(11) || ''}${isLateSession(opts.nowBJ) ? ' ⚠️尾盘时段：开新仓即锁隔夜，除非日内形态健康+情绪未退潮，否则应放弃等次日' : ''}
 【账户回撤状态】自净值高点回撤${(guard.dd*100).toFixed(1)}%，模式=${guard.mode}${guard.mode==='defensive'?'（防守模式：风险预算已减半，只做最高确定性的机会）':''}。回撤≥8%将触发熔断停止开新仓。
 【大盘】${(indices || []).map(i => `${i.name} ${i.price}(${(i.pct*100).toFixed(2)}%)`).join('；') || '数据缺失'}
-【板块】领涨: ${(sectors?.top || []).join('、')}；领跌: ${(sectors?.bottom || []).join('、')}
+【板块】领涨: ${(sectors?.top || []).map(x => `${x.name}+${x.pct}%`).join('、')}；领跌: ${(sectors?.bottom || []).map(x => `${x.name}${x.pct}%`).join('、')}${sentiment?.ztBySector ? '；涨停板块分布(≥2家): ' + Object.entries(sentiment.ztBySector).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`).join('、') : ''}
 【题材梯队(概念排行:涨幅/涨跌家数/龙头)】${(leaders || []).map(l => `${l.name}+${l.pct}%(涨${l.up}跌${l.down})龙头${l.leader}+${l.leaderPct}%`).join('；') || '缺失'}
 【持仓明细】${JSON.stringify(heldSnap)}
 【持仓技术面/新闻】${JSON.stringify(heldExtra)}
